@@ -88,7 +88,7 @@
 
 ```bash
 cd feishu-bridge
-nohup .venv/bin/python bridge.py >> bridge.log 2>&1 &
+nohup .venv/bin/python -m feishu_codex_bridge >> bridge.log 2>&1 &
 ```
 
 3. 在飞书里给机器人发消息，例如：`帮我看看路由器 10.33.10.31 是否在线`。

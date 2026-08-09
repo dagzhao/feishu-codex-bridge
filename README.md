@@ -36,19 +36,25 @@
 ```bash
 cd feishu-bridge
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e ".[dev]"
 ```
 
 启动：
 
 ```bash
-.venv/bin/python bridge.py
+.venv/bin/python -m feishu_codex_bridge
 ```
 
 保持后台运行：
 
 ```bash
-nohup .venv/bin/python bridge.py >> bridge.log 2>&1 &
+nohup .venv/bin/python -m feishu_codex_bridge >> bridge.log 2>&1 &
+```
+
+运行测试：
+
+```bash
+.venv/bin/python -m pytest
 ```
 
 ## 四、使用
