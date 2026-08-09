@@ -1,0 +1,11 @@
+{
+  "app_id": "cli_xxxxxxxxxxxxxxxx",
+  "app_secret": "请填写你的AppSecret",
+  "allowed_open_ids": [],
+  "allowed_chat_ids": [],
+  "codex_bin": "/Applications/ChatGPT.app/Contents/Resources/codex",
+  "workdir": "/Users/zhaojingtao/Documents/Codex/2026-08-08/openwr-10-33-10-31-root",
+  "task_timeout_sec": 300,
+  "max_reply_len": 3500,
+  "log_file": "bridge.log"
+}
