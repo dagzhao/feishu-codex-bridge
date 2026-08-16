@@ -6,3 +6,7 @@ __pycache__/
 dist/
 bridge.log
 config.json
+openwrt.sh
+firewall.sh
+.bridge_state.json
+HANDOFF.md

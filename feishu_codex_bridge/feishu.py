@@ -26,12 +26,16 @@ def _open_id_of(event: P2ImMessageReceiveV1) -> str:
         return ""
 
 
+def open_id_of(event: P2ImMessageReceiveV1) -> str:
+    return _open_id_of(event)
+
+
 def is_allowed(event: P2ImMessageReceiveV1, config: dict) -> bool:
     open_id = _open_id_of(event)
     chat_id = event.event.message.chat_id or ""
     allow_ids = set(config.get("allowed_open_ids", []))
     allow_chats = set(config.get("allowed_chat_ids", []))
-    if open_id in allow_ids or chat_id in allow_chats:
+    if (not allow_ids and not allow_chats) or open_id in allow_ids or chat_id in allow_chats:
         return True
     LOGGER.warning("拒绝未授权消息: open_id=%s chat_id=%s", open_id, chat_id)
     return False
