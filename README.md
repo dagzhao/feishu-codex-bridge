@@ -68,6 +68,11 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
 > 使用开机自启**（旧的 `com.codex.feishu-bridge` LaunchAgent 已移除）；如需
 > 开机自启，请给运行环境授予「完全磁盘访问权限」后自行注册 LaunchAgent，
 > 或把代码放到 `~/` 下（与本仓库原设计一致）。
+>
+> 若使用 LaunchAgent（`com.dsh.feishu-bridge`）：必须在 plist 里通过
+> `EnvironmentVariables` 设置完整 `PATH`（含 `/opt/homebrew/bin`），否则
+> `dsh` 脚本的 `#!/usr/bin/env node` 找不到 node，任务会报
+> `env: node: No such file or directory`（退出码 127）。
 
 ## 四、使用
 
@@ -94,6 +99,15 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
 DSH headless 为一次性任务模式：**每条消息都是独立任务**，不会记住之前的
 对话上下文。发送「新会话」/「退出会话」仅作提示（每条消息本就独立）。
 如需多轮上下文，请在消息里自带背景信息。
+
+### 一次性会话自动清理
+
+每条飞书消息都会在 `~/.dsh/sessions/` 留下一个一次性任务会话（会在 GUI
+会话列表的「Ungrouped」中出现）。桥接默认每小时清理一次超过 24 小时的一次性
+会话（web 主会话/桌面会话带 `agentPreset`，永不删除）。可用配置调整：
+
+- `session_cleanup_max_age_hours`：一次性会话保留时长（默认 24）
+- `session_cleanup_interval_hours`：清理执行间隔（默认 6）
 
 ## 安全说明
 

@@ -15,6 +15,7 @@ from lark_oapi.ws import Client as WSClient
 from .dsh import run_dsh
 from .config import load_config, setup_logging
 from .feishu import build_lark_client, extract_text, is_allowed, open_id_of, send_text
+from .cleanup import cleanup_one_shot_sessions
 
 LOGGER = logging.getLogger("feishu_codex_bridge")
 
@@ -185,11 +186,33 @@ def _safe_handle(event: P2ImMessageReceiveV1, config: dict, client: lark.Client)
             LOGGER.exception("发送错误提示失败")
 
 
+def _start_session_cleanup(config: dict) -> None:
+    """启动时清理一次，之后按配置间隔定期清理一次性任务会话。"""
+    max_age = float(config.get("session_cleanup_max_age_hours", 24))
+    interval = float(config.get("session_cleanup_interval_hours", 6))
+    try:
+        cleanup_one_shot_sessions(max_age)
+    except Exception:
+        LOGGER.exception("启动时清理一次性会话失败")
+
+    def _loop() -> None:
+        while True:
+            time.sleep(interval * 3600)
+            try:
+                cleanup_one_shot_sessions(max_age)
+            except Exception:
+                LOGGER.exception("定期清理一次性会话失败")
+
+    threading.Thread(target=_loop, daemon=True, name="session-cleanup").start()
+    LOGGER.info("一次性会话自动清理已启用: 超过 %.1f 小时清理，每 %.1f 小时执行", max_age, interval)
+
+
 def main() -> None:
     config = load_config()
     setup_logging(config)
     LOGGER.info("飞书桥接服务启动: app_id=%s", config["app_id"])
     client = build_lark_client(config)
+    _start_session_cleanup(config)
 
     def _on_reconnecting() -> None:
         global _drop_started_at, _reconnecting, _warned_long_disconnect
