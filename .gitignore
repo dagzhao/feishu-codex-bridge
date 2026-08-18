@@ -9,4 +9,6 @@ config.json
 openwrt.sh
 firewall.sh
 .bridge_state.json
+.bridge.pid
+.feishu_sessions.json
 HANDOFF.md

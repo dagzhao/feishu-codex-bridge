@@ -1,7 +1,9 @@
 """飞书消息处理主逻辑与长连接服务入口。"""
 
+import fcntl
 import json
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -14,8 +16,14 @@ from lark_oapi.ws import Client as WSClient
 
 from .dsh import run_dsh
 from .config import load_config, setup_logging
-from .feishu import build_lark_client, extract_text, is_allowed, open_id_of, send_text
-from .cleanup import cleanup_one_shot_sessions
+from .feishu import (
+    build_lark_client,
+    extract_text,
+    is_allowed,
+    open_id_of,
+    send_card,
+    send_text,
+)
 
 LOGGER = logging.getLogger("feishu_codex_bridge")
 
@@ -31,7 +39,29 @@ _reconnecting: bool = False
 _warned_long_disconnect: bool = False
 _LONG_DISCONNECT_WARN_SEC = 60.0
 
-_CLEAR_CMDS = ("新会话", "退出会话", "结束会话", "退出当前会话")
+_CLEAR_CMDS = ("新会话", "退出会话", "结束会话", "退出当前会话", "重置会话")
+
+# 固定会话：DSH headless 通过 DSH_SESSION_ID 复用持久化会话（真·续聊）。
+# 所有飞书消息共用一个固定会话 id（不区分用户），映射存本地
+# .feishu_sessions.json；「新会话」删除映射（轮换 id），下次对话走全新
+# 会话。旧会话文件保留在 ~/.dsh/sessions，由 DSH 侧（web 插件）负责
+# 删除，桥接层不再删任何会话文件。映射文件存本地，避免与 DSH 的
+# ~/.dsh/sessions 混淆。
+#
+# 空闲自动结束：每次消息都会更新 last_active；距上次消息超过
+# session_idle_timeout_min（默认 10 分钟）时，下一条消息自动轮换到全新
+# 会话 id（旧会话就此「结束」），10 分钟内继续发消息则沿用同一会话。
+_SESSION_MAP_FILE = Path(__file__).resolve().parent.parent / ".feishu_sessions.json"
+_SHARED_SESSION_KEY = "shared"
+_SHARED_ACTIVE_KEY = "shared_active_at"
+
+# 单实例 pidfile：防止误起多个桥接进程导致飞书消息重复处理。
+_PID_FILE = Path(__file__).resolve().parent.parent / ".bridge.pid"
+# 持有 flock 的文件对象（保持引用防止被 GC 关闭而释放锁）。
+_PID_LOCK_FH = None
+
+# 所有消息共用同一会话后，并发 run_dsh 会互相覆盖上下文，串行执行保证安全。
+_RUN_LOCK = threading.Lock()
 
 
 def _load_last_chat_id() -> Optional[str]:
@@ -109,15 +139,72 @@ def _mark_processed(message_id: str) -> bool:
     return False
 
 
-def handle_commands(prompt: str, open_id: str) -> Optional[str]:
+def _shared_session_id(idle_timeout_sec: Optional[float] = None) -> str:
+    """读取（或创建）所有飞书消息共用的固定 DSH 会话 id。
+
+    idle_timeout_sec 非空时：距上次消息超过该时长 → 自动轮换到全新会话 id
+    （旧会话结束）；未超时 → 沿用并刷新 last_active。为 None 则永不因空闲
+    轮换（只有「新会话」命令强制重置）。
+    """
+    try:
+        data = json.loads(_SESSION_MAP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    now = time.time()
+    sid = data.get(_SHARED_SESSION_KEY)
+    last = data.get(_SHARED_ACTIVE_KEY)
+    if sid and idle_timeout_sec and last is not None:
+        try:
+            idle = now - float(last)
+        except (TypeError, ValueError):
+            idle = 0.0
+        if idle > idle_timeout_sec:
+            LOGGER.info("会话空闲 %.0f 秒（>%.0f），自动开启新会话", idle, idle_timeout_sec)
+            sid = None
+    if not sid:
+        import uuid
+        sid = f"session-feishu-{uuid.uuid4().hex[:8]}"
+    data[_SHARED_SESSION_KEY] = sid
+    data[_SHARED_ACTIVE_KEY] = now
+    try:
+        _SESSION_MAP_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        LOGGER.exception("保存会话映射失败")
+    return sid
+
+
+def _reset_shared_session() -> None:
+    """重置共用会话：只删除映射（轮换 id），不删任何会话文件。
+
+    旧会话文件保留在 ~/.dsh/sessions，由 DSH 侧（web 插件/手动）删除。
+    """
+    try:
+        data = json.loads(_SESSION_MAP_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    data.pop(_SHARED_SESSION_KEY, None)
+    data.pop(_SHARED_ACTIVE_KEY, None)
+    try:
+        _SESSION_MAP_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        LOGGER.exception("保存会话映射失败")
+
+
+def handle_commands(prompt: str) -> Optional[str]:
     """处理会话管理命令；返回回复文本，非命令消息返回 None。
 
-    DSH headless 为一次性任务模式：每条消息都是独立任务，没有可续聊的
-    会话。保留「新会话」等命令仅为提示用户这一行为。
+    DSH headless 现在支持固定会话续聊（DSH_SESSION_ID 环境变量）：
+    「新会话」删除共用会话映射（轮换 id），下次对话走全新上下文；
+    旧会话文件交由 DSH 侧删除，桥接层不删任何会话。
     """
     prompt = prompt.strip()
     if prompt in _CLEAR_CMDS:
-        return "🆕 已开启新会话：DSH 为一次性任务模式，每条消息都会独立处理，无需切换会话。"
+        _reset_shared_session()
+        return "🆕 已开启新会话：下次对话将使用全新上下文。"
     return None
 
 
@@ -132,7 +219,7 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
     _remember_chat(chat_id)
 
     open_id = open_id_of(event)
-    command_reply = handle_commands(prompt, open_id)
+    command_reply = handle_commands(prompt)
     if command_reply is not None:
         LOGGER.info("命令处理: open_id=%s 命令=%s", open_id, prompt.strip()[:50])
         send_text(client, chat_id, command_reply)
@@ -146,18 +233,24 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
         except Exception:
             LOGGER.exception("发送过程提示失败")
 
-    result = run_dsh(
-        prompt,
-        config["dsh_bin"],
-        config["workdir"],
-        int(config.get("task_timeout_sec", 300)),
-        on_progress=_send_progress,
-        progress_interval=float(config.get("progress_interval_sec", 10)),
-    )
+    # 所有消息共用同一会话，串行执行避免并发写入互相覆盖上下文。
+    # 空闲超过 session_idle_timeout_min（默认 10 分钟）自动轮换新会话。
+    idle_min = float(config.get("session_idle_timeout_min", 10))
+    with _RUN_LOCK:
+        result = run_dsh(
+            prompt,
+            config["dsh_bin"],
+            config["workdir"],
+            int(config.get("task_timeout_sec", 300)),
+            on_progress=_send_progress,
+            progress_interval=float(config.get("progress_interval_sec", 10)),
+            session_id=_shared_session_id(idle_timeout_sec=idle_min * 60),
+            permission_mode=config.get("dsh_permission_mode", "danger-full-access"),
+        )
     max_len = int(config.get("max_reply_len", 3500))
     if len(result) > max_len:
         result = result[:max_len] + "\n\n…(结果过长已截断)"
-    send_text(client, chat_id, result)
+    send_card(client, chat_id, result)
 
 
 def make_handler(config: dict, client: lark.Client):
@@ -186,33 +279,35 @@ def _safe_handle(event: P2ImMessageReceiveV1, config: dict, client: lark.Client)
             LOGGER.exception("发送错误提示失败")
 
 
-def _start_session_cleanup(config: dict) -> None:
-    """启动时清理一次，之后按配置间隔定期清理一次性任务会话。"""
-    max_age = float(config.get("session_cleanup_max_age_hours", 24))
-    interval = float(config.get("session_cleanup_interval_hours", 6))
+def _acquire_single_instance() -> None:
+    """单实例保护：flock 原子锁 + pidfile，防止误起多个桥接进程。
+
+    锁随进程持有（fd 保存在 _PID_LOCK_FH），第二个进程拿不到锁即退出，
+    无 TOCTOU 竞态。
+    """
+    global _PID_LOCK_FH
     try:
-        cleanup_one_shot_sessions(max_age)
-    except Exception:
-        LOGGER.exception("启动时清理一次性会话失败")
-
-    def _loop() -> None:
-        while True:
-            time.sleep(interval * 3600)
-            try:
-                cleanup_one_shot_sessions(max_age)
-            except Exception:
-                LOGGER.exception("定期清理一次性会话失败")
-
-    threading.Thread(target=_loop, daemon=True, name="session-cleanup").start()
-    LOGGER.info("一次性会话自动清理已启用: 超过 %.1f 小时清理，每 %.1f 小时执行", max_age, interval)
+        fh = open(_PID_FILE, "a+", encoding="utf-8")
+    except OSError:
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        LOGGER.error("另一个桥接进程已在运行，拒绝重复启动")
+        raise SystemExit(1)
+    _PID_LOCK_FH = fh  # 保持引用，锁随进程生命周期持有
+    fh.seek(0)
+    fh.truncate()
+    fh.write(str(os.getpid()))
+    fh.flush()
 
 
 def main() -> None:
     config = load_config()
     setup_logging(config)
+    _acquire_single_instance()
     LOGGER.info("飞书桥接服务启动: app_id=%s", config["app_id"])
     client = build_lark_client(config)
-    _start_session_cleanup(config)
 
     def _on_reconnecting() -> None:
         global _drop_started_at, _reconnecting, _warned_long_disconnect

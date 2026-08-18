@@ -23,6 +23,33 @@ echo '这是 DSH 的最终答复'
     assert result == "这是 DSH 的最终答复"
 
 
+def test_run_dsh_passes_permission_mode_env(tmp_path):
+    script = """#!/bin/sh
+echo "mode=$DSH_PERMISSION_MODE"
+"""
+    result = run_dsh(
+        "测试任务",
+        _fake_dsh(tmp_path, script),
+        str(tmp_path),
+        timeout=30,
+        permission_mode="danger-full-access",
+    )
+    assert result == "mode=danger-full-access"
+
+
+def test_run_dsh_unset_permission_mode_without_arg(tmp_path):
+    script = """#!/bin/sh
+echo "mode=${DSH_PERMISSION_MODE:-unset}"
+"""
+    result = run_dsh(
+        "测试任务",
+        _fake_dsh(tmp_path, script),
+        str(tmp_path),
+        timeout=30,
+    )
+    assert result == "mode=unset"
+
+
 def test_run_dsh_sends_start_progress(tmp_path):
     script = """#!/bin/sh
 sleep 0.2

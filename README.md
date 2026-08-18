@@ -4,8 +4,9 @@
 执行任务，并把结果发回飞书。无需公网 IP、无需域名、无需回调服务器（使用
 飞书官方长连接）。
 
-> 后端从 Codex 迁移到 DSH：每条消息 = 一个独立的 `dsh --profile headless`
-> 一次性任务（无续聊会话）。
+> 后端从 Codex 迁移到 DSH：每条消息 = 一个 `dsh --profile headless` 任务；
+> 自 2026-08-17 起支持**固定会话续聊**（所有飞书消息共用一个持久化会话，
+> 真·多轮上下文），见下文「固定会话续聊」。
 
 ## 一、飞书开放平台配置（一次）
 
@@ -26,7 +27,14 @@
    - `allowed_open_ids`：允许使用机器人的飞书用户 open_id（留空数组 = 所有人可用，**强烈建议填写**）
    - `allowed_chat_ids`：允许使用的群 chat_id（可选，留空则不限制群）
    - `dsh_bin`：DSH CLI 可执行文件路径（`node_modules/.bin/dsh`）
-   - `workdir`：DSH 执行任务的工作目录（默认当前工作区）
+   - `workdir`：DSH 执行任务的工作目录（当前为独立飞书工作区
+     `~/Documents/feishu-workspace`，对应 Web GUI 左侧的「飞书」工作区；如需
+     改回主工作区可填 `~/Documents/harnessWorkSpace`）
+   - `dsh_permission_mode`：headless 沙箱文件策略，默认
+     `danger-full-access`（全权限、无审批；headless 默认是 `workspace-write`，
+     只允许写工作目录内——改到独立工作区后必须 full access 才能访问其他目录）
+   - `session_idle_timeout_min`：会话空闲结束时间（分钟），默认 10——超过该
+     时长没有新消息，下一条消息自动开启全新会话
    - `task_timeout_sec`：单个任务超时（秒），默认 300
 2. 获取你自己的 open_id：
    - 启动服务后，在飞书给机器人发任意消息，查看 `bridge.log` 里 `拒绝未授权消息: open_id=xxx` 的日志；或
@@ -54,8 +62,12 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge
 
 ```bash
 cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge
-nohup .venv/bin/python -m feishu_codex_bridge >> bridge.log 2>&1 &
+nohup bash -c 'exec .venv/bin/python -m feishu_codex_bridge' >> bridge.log 2>&1 &
 ```
+
+> 注意：直接 `nohup .venv/bin/python -m ... &` 在本机环境下偶尔会被二次拉起
+> 成两个进程（飞书消息会重复处理）。请用上面的 `bash -c 'exec ...'` 包装形式；
+> 另外 bridge 自带 flock 单实例保护（`.bridge.pid`），重复进程会被拒绝退出。
 
 运行测试：
 
@@ -94,20 +106,35 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
   刚才没收到回复的消息请重发」
 - 短于 15 秒的闪断不打扰你（会自动重连，且重连期间的消息通常不受影响）
 
-### 一次性任务模式（无会话续聊）
+### 固定会话续聊（真·多轮上下文）
 
-DSH headless 为一次性任务模式：**每条消息都是独立任务**，不会记住之前的
-对话上下文。发送「新会话」/「退出会话」仅作提示（每条消息本就独立）。
-如需多轮上下文，请在消息里自带背景信息。
+自 2026-08-17 起，DSH headless 支持通过环境变量 `DSH_SESSION_ID` 复用持久化
+会话（`~/.dsh/sessions/`），实现**真正的多轮续聊**：
 
-### 一次性会话自动清理
+- 桥接层使用一个固定会话 id（`session-feishu-<hex>`，存 `.feishu_sessions.json`），
+  **所有飞书消息共用一个会话**，模型能记住之前的对话内容（同一会话内串行
+  处理，避免并发写入互相覆盖上下文）。
+- **空闲自动结束会话**（2026-08-18 起）：距上次消息超过
+  `session_idle_timeout_min`（默认 10 分钟）后，下一条消息自动轮换到全新
+  会话 id（旧会话就此结束、上下文清空）；10 分钟内继续发消息则沿用同一会话。
+- 发送「新会话」/「退出会话」/「重置会话」会删除该会话映射（轮换 id），
+  下一次对话自动走全新会话（上下文清空）。
+- 实现：headless profile 挂载本地插件
+  `~/.dsh/profiles/headless/plugins/headless-session.js`（通过
+  `cordis.patch.yml` 的 `insert` 注入并禁用默认 runner），无 session 时行为
+  与原先的一次性模式完全一致。
 
-每条飞书消息都会在 `~/.dsh/sessions/` 留下一个一次性任务会话（会在 GUI
-会话列表的「Ungrouped」中出现）。桥接默认每小时清理一次超过 24 小时的一次性
-会话（web 主会话/桌面会话带 `agentPreset`，永不删除）。可用配置调整：
+### 会话删除交给 DSH（桥接不再删会话）
 
-- `session_cleanup_max_age_hours`：一次性会话保留时长（默认 24）
-- `session_cleanup_interval_hours`：清理执行间隔（默认 6）
+- 自 2026-08-18 起，feishu-bridge **不再负责删除任何会话**：移除了一次性会话
+  自动清理调度；「新会话」只删除会话映射（轮换 id），旧会话文件保留在
+  `~/.dsh/sessions/`，由 DSH 侧管理。
+- DSH Web GUI 的会话删除由社区插件
+  [`dsh-plugin-session-delete`](https://github.com/lsz-asd/dsh-plugin-session-delete)
+  提供（已装进 web profile）：会话行菜单「删除」+ 头部危险按钮，删除时会清理
+  会话日志、投影缓存与工作区记账。
+- 遗留配置项 `session_cleanup_max_age_hours` / `session_cleanup_interval_hours`
+  已不再使用，可保留可删除。
 
 ## 安全说明
 

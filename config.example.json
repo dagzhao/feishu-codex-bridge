@@ -4,11 +4,11 @@
   "allowed_open_ids": [],
   "allowed_chat_ids": [],
   "dsh_bin": "/Users/zhaojingtao/.npm/_npx/1e7f6d9597241db0/node_modules/.bin/dsh",
-  "workdir": "/Users/zhaojingtao/Documents/harnessWorkSpace",
+  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
+  "dsh_permission_mode": "danger-full-access",
+  "session_idle_timeout_min": 10,
   "task_timeout_sec": 300,
   "progress_interval_sec": 10,
   "max_reply_len": 3500,
-  "log_file": "bridge.log",
-  "session_cleanup_max_age_hours": 24,
-  "session_cleanup_interval_hours": 6
+  "log_file": "bridge.log"
 }

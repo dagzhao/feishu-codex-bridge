@@ -1,9 +1,12 @@
 import json
+import os
+import time
+from types import SimpleNamespace
 
 import pytest
 from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
 
-from feishu_codex_bridge.feishu import extract_text, is_allowed
+from feishu_codex_bridge.feishu import extract_text, is_allowed, md_table_to_codeblock, send_card
 
 
 def make_event(text: str, open_id: str = "ou_test", chat_id: str = "oc_test"):
@@ -21,6 +24,96 @@ def make_event(text: str, open_id: str = "ou_test", chat_id: str = "oc_test"):
             }
         }
     )
+
+
+def test_md_table_to_codeblock_wraps_table():
+    text = "标题\n\n| 列A | 列B |\n| --- | --- |\n| 1 | 2 |\n\n结尾"
+    out = md_table_to_codeblock(text)
+    assert "```" in out
+    assert "| 列A | 列B |" in out
+    # 表格被整体包进一个代码块
+    assert out.count("```") == 2
+    assert out.index("| 列A | 列B |") > out.index("```")
+
+
+def test_md_table_to_codeblock_leaves_plain_text():
+    text = "纯文本，没有表格"
+    assert md_table_to_codeblock(text) == text
+
+
+def test_send_card_sends_interactive_for_markdown(monkeypatch):
+    import feishu_codex_bridge.feishu as feishu_mod
+
+    captured = {}
+
+    class RequestBody:
+        def __init__(self):
+            self.values = {}
+
+        def receive_id(self, v):
+            self.values["receive_id"] = v
+            return self
+
+        def msg_type(self, v):
+            self.values["msg_type"] = v
+            return self
+
+        def content(self, v):
+            self.values["content"] = v
+            return self
+
+        def build(self):
+            return SimpleNamespace(**self.values)
+
+    class RequestBuilder:
+        def __init__(self):
+            self._body = None
+
+        def receive_id_type(self, _):
+            return self
+
+        def request_body(self, body):
+            self._body = body
+            return self
+
+        def build(self):
+            return {"request_body": self._body}
+
+    class FakeMessage:
+        def create(self, request):
+            captured["request"] = request
+            return type("R", (), {"success": lambda self: True, "code": 0, "msg": "ok"})()
+
+    fake_lark = type(
+        "lark",
+        (),
+        {"im": type("im", (), {"v1": type("v1", (), {
+            "CreateMessageRequest": type("C", (), {"builder": staticmethod(RequestBuilder)}),
+            "CreateMessageRequestBody": type("B", (), {"builder": staticmethod(RequestBody)}),
+        })()})()},
+    )
+    monkeypatch.setattr(feishu_mod, "lark", fake_lark)
+    client = type("C", (), {"im": type("im", (), {"v1": type("v1", (), {
+        "message": FakeMessage()})()})()})()
+
+    send_card(client, "oc_1", "**加粗** 和 `代码`")
+    body = captured["request"]["request_body"]
+    assert body.msg_type == "interactive"
+    payload = json.loads(body.content)
+    # content 只含 card 对象本身（无 msg_type / card 包装）
+    assert "msg_type" not in payload
+    assert payload["elements"][0]["tag"] == "markdown"
+    assert payload["header"]["title"]["content"] == "🤖 DSH 执行结果"
+
+
+def test_send_card_falls_back_to_text_without_markdown(monkeypatch):
+    import feishu_codex_bridge.feishu as feishu_mod
+
+    send_text_calls = []
+    monkeypatch.setattr(feishu_mod, "send_text",
+                        lambda client, chat_id, text: send_text_calls.append((chat_id, text)))
+    send_card(object(), "oc_1", "简单的一句话")
+    assert send_text_calls == [("oc_1", "简单的一句话")]
 
 
 def test_extract_text_strips_mention():
@@ -84,15 +177,15 @@ def test_mark_processed_deduplicates():
     assert _mark_processed("om_other") is False
 
 
-def test_handle_commands_clear_acknowledges_one_shot_mode():
+def test_handle_commands_clear_acknowledges_shared_session_mode():
     from feishu_codex_bridge.bridge import handle_commands
 
-    reply = handle_commands("新会话", "ou_1")
-    assert "一次性任务" in reply
-    reply = handle_commands("退出会话", "ou_1")
-    assert "一次性任务" in reply
-    assert handle_commands("查看会话", "ou_1") is None
-    assert handle_commands("查询系统状态", "ou_1") is None
+    reply = handle_commands("新会话")
+    assert "全新上下文" in reply
+    reply = handle_commands("退出会话")
+    assert "全新上下文" in reply
+    assert handle_commands("查看会话") is None
+    assert handle_commands("查询系统状态") is None
 
 
 def test_list_recent_sessions_reads_files(tmp_path, monkeypatch):
@@ -229,3 +322,66 @@ def test_warn_if_still_down_sends_once(monkeypatch):
     t2.start()
     t2.join(timeout=2)
     assert len(sent) == 1
+
+
+def test_shared_session_roundtrip(tmp_path, monkeypatch):
+    """共用会话 id：所有消息稳定复用同一会话；「新会话」删除映射轮换 id（不删文件）。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+
+    monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", tmp_path / ".feishu_sessions.json")
+
+    sid1 = bridge_mod._shared_session_id()
+    sid2 = bridge_mod._shared_session_id()
+    assert sid1 == sid2  # 共用会话稳定复用
+    assert sid1.startswith("session-feishu-")
+
+    bridge_mod._reset_shared_session()
+    sid3 = bridge_mod._shared_session_id()
+    assert sid3 != sid1  # 重置后轮换到全新 id
+
+    # 重置只动映射、不删会话文件
+    data = json.loads((tmp_path / ".feishu_sessions.json").read_text(encoding="utf-8"))
+    assert set(data.keys()) == {"shared", "shared_active_at"}
+
+
+def test_shared_session_idle_rotation(tmp_path, monkeypatch):
+    """空闲超过阈值自动轮换新会话（会话结束）；未超时沿用同一会话。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+
+    map_file = tmp_path / ".feishu_sessions.json"
+    monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", map_file)
+
+    sid1 = bridge_mod._shared_session_id(idle_timeout_sec=600)
+    sid2 = bridge_mod._shared_session_id(idle_timeout_sec=600)  # 马上又来一条
+    assert sid2 == sid1  # 未超时沿用
+
+    # 把 last_active 拨到 10 分钟前 → 应轮换新会话
+    data = json.loads(map_file.read_text(encoding="utf-8"))
+    data["shared_active_at"] = time.time() - 601
+    map_file.write_text(json.dumps(data), encoding="utf-8")
+    sid3 = bridge_mod._shared_session_id(idle_timeout_sec=600)
+    assert sid3 != sid1  # 空闲超时自动开启新会话
+
+    # 不传 idle_timeout 永不因空闲轮换
+    data = json.loads(map_file.read_text(encoding="utf-8"))
+    data["shared_active_at"] = time.time() - 999999
+    map_file.write_text(json.dumps(data), encoding="utf-8")
+    sid4 = bridge_mod._shared_session_id()
+    assert sid4 == sid3
+
+
+def test_single_instance_guard(tmp_path, monkeypatch):
+    """flock 单实例保护：占用锁后第二次获取失败（拒绝重复启动）。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+
+    pid_file = tmp_path / ".bridge.pid"
+    monkeypatch.setattr(bridge_mod, "_PID_FILE", pid_file)
+    bridge_mod._PID_LOCK_FH = None
+
+    # 第一次获取成功，锁随进程持有
+    bridge_mod._acquire_single_instance()
+    assert pid_file.read_text(encoding="utf-8").strip() == str(os.getpid())
+
+    # 锁仍被持有 → 第二次拒绝
+    with pytest.raises(SystemExit):
+        bridge_mod._acquire_single_instance()

@@ -3,6 +3,12 @@
 DSH headless 是一次性任务模式：`dsh --profile headless <任务>` 创建单个
 Agent 执行任务、打印最终答复并退出。无 Codex 那样的 JSON 事件流，因此
 不再有逐步骤的实时过程提示——收到指令后的同步确认就是进度反馈。
+
+自 2026-08-17 起支持固定会话续聊：headless profile 挂载了本地插件
+`headless-session`（~/.dsh/profiles/headless/plugins/headless-session.js），
+通过环境变量 `DSH_SESSION_ID` 指定要复用/创建的持久化会话 id；不传则保持
+一次性全新会话。桥接层使用一个固定会话 id（所有飞书消息共用）即可实现
+飞书内连续对话。
 """
 
 import logging
@@ -23,18 +29,35 @@ def run_dsh(
     timeout: int,
     on_progress: Optional[Callable[[str], None]] = None,
     progress_interval: float = 10.0,
+    session_id: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> str:
     """运行 dsh --profile headless 并返回最终答复文本。
 
     on_progress 保留兼容（DSH headless 无事件流，通常只在开始时收到一次
-    「正在处理」提示）。
+    「正在处理」提示）。session_id 非空时通过 DSH_SESSION_ID 环境变量
+    复用/创建固定持久化会话（真·多轮续聊）；为空则每次全新会话。
+    permission_mode 非空时通过 DSH_PERMISSION_MODE 覆盖 headless 的沙箱
+    文件策略（danger-full-access = 全权限、无审批；默认不传则按 headless
+    自身默认 workspace-write）。
     """
     cmd = [dsh_bin, "--profile", "headless", prompt]
-    LOGGER.info("调用 DSH headless: %s", prompt[:200])
+    LOGGER.info("调用 DSH headless: %s (session=%s)", prompt[:200], session_id or "-")
+
+    env = dict(os.environ)
+    if session_id:
+        env["DSH_SESSION_ID"] = session_id
+    else:
+        env.pop("DSH_SESSION_ID", None)
+    if permission_mode:
+        env["DSH_PERMISSION_MODE"] = permission_mode
+    else:
+        env.pop("DSH_PERMISSION_MODE", None)
 
     proc = subprocess.Popen(
         cmd,
         cwd=workdir,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
