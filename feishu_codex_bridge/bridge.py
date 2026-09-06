@@ -48,9 +48,11 @@ _CLEAR_CMDS = ("新会话", "退出会话", "结束会话", "退出当前会话"
 # 删除，桥接层不再删任何会话文件。映射文件存本地，避免与 DSH 的
 # ~/.dsh/sessions 混淆。
 #
-# 空闲自动结束：每次消息都会更新 last_active；距上次消息超过
-# session_idle_timeout_min（默认 10 分钟）时，下一条消息自动轮换到全新
-# 会话 id（旧会话就此「结束」），10 分钟内继续发消息则沿用同一会话。
+# 会话生命周期（2026-08-22 起）：默认**永不因空闲自动轮换**——只有
+# 消息为「新会话」等命令时才轮换到全新会话 id（旧会话保留在
+# ~/.dsh/sessions，由 DSH 侧删除）。若在 config.json 显式配置
+# session_idle_timeout_min > 0，则仍按该分钟数空闲自动轮换
+# （可选兼容行为，默认 0 = 不轮换）。
 _SESSION_MAP_FILE = Path(__file__).resolve().parent.parent / ".feishu_sessions.json"
 _SHARED_SESSION_KEY = "shared"
 _SHARED_ACTIVE_KEY = "shared_active_at"
@@ -234,8 +236,10 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
             LOGGER.exception("发送过程提示失败")
 
     # 所有消息共用同一会话，串行执行避免并发写入互相覆盖上下文。
-    # 空闲超过 session_idle_timeout_min（默认 10 分钟）自动轮换新会话。
-    idle_min = float(config.get("session_idle_timeout_min", 10))
+    # 默认永不因空闲自动轮换（session_idle_timeout_min 配置 > 0 时才按
+    # 分钟数空闲轮换）；只有「新会话」等命令才强制轮换全新上下文。
+    idle_min = float(config.get("session_idle_timeout_min", 0) or 0)
+    idle_sec = idle_min * 60 if idle_min > 0 else None
     with _RUN_LOCK:
         result = run_dsh(
             prompt,
@@ -244,7 +248,7 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
             int(config.get("task_timeout_sec", 300)),
             on_progress=_send_progress,
             progress_interval=float(config.get("progress_interval_sec", 10)),
-            session_id=_shared_session_id(idle_timeout_sec=idle_min * 60),
+            session_id=_shared_session_id(idle_timeout_sec=idle_sec),
             permission_mode=config.get("dsh_permission_mode", "danger-full-access"),
         )
     max_len = int(config.get("max_reply_len", 3500))

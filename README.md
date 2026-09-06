@@ -26,15 +26,16 @@
    - `app_id` / `app_secret`：填上一步拿到的值
    - `allowed_open_ids`：允许使用机器人的飞书用户 open_id（留空数组 = 所有人可用，**强烈建议填写**）
    - `allowed_chat_ids`：允许使用的群 chat_id（可选，留空则不限制群）
-   - `dsh_bin`：DSH CLI 可执行文件路径（`node_modules/.bin/dsh`）
+   - `dsh_bin`：DSH CLI 可执行文件路径。**可留空**——留空或路径失效时自动解析（优先 PATH 上的 `dsh`，其次扫描 `~/.npm/_npx/*/node_modules/.bin/dsh` 取最新）
    - `workdir`：DSH 执行任务的工作目录（当前为独立飞书工作区
      `~/Documents/feishu-workspace`，对应 Web GUI 左侧的「飞书」工作区；如需
      改回主工作区可填 `~/Documents/harnessWorkSpace`）
    - `dsh_permission_mode`：headless 沙箱文件策略，默认
      `danger-full-access`（全权限、无审批；headless 默认是 `workspace-write`，
      只允许写工作目录内——改到独立工作区后必须 full access 才能访问其他目录）
-   - `session_idle_timeout_min`：会话空闲结束时间（分钟），默认 10——超过该
-     时长没有新消息，下一条消息自动开启全新会话
+   - `session_idle_timeout_min`：会话空闲自动轮换时间（分钟），默认 0 =
+     永不因空闲轮换——**只延续旧会话，除非消息是「新会话」命令**；如想恢复
+     旧的空闲自动结束行为，设 > 0（超过该时长没新消息，下一条消息开新会话）
    - `task_timeout_sec`：单个任务超时（秒），默认 300
 2. 获取你自己的 open_id：
    - 启动服务后，在飞书给机器人发任意消息，查看 `bridge.log` 里 `拒绝未授权消息: open_id=xxx` 的日志；或
