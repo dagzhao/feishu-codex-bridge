@@ -12,4 +12,5 @@ firewall.sh
 .bridge_state.json
 .bridge.pid
 .feishu_sessions.json
+.feishu_sessions.json.bak-*
 HANDOFF.md
