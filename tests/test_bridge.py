@@ -178,14 +178,16 @@ def test_mark_processed_deduplicates():
 
 
 def test_handle_commands_clear_acknowledges_shared_session_mode():
+    from feishu_codex_bridge.backend import get_backend
     from feishu_codex_bridge.bridge import handle_commands
 
-    reply = handle_commands("新会话")
+    backend = get_backend({})
+    reply = handle_commands("新会话", backend)
     assert "全新上下文" in reply
-    reply = handle_commands("退出会话")
+    reply = handle_commands("退出会话", backend)
     assert "全新上下文" in reply
-    assert handle_commands("查看会话") is None
-    assert handle_commands("查询系统状态") is None
+    assert handle_commands("查看会话", backend) is None
+    assert handle_commands("查询系统状态", backend) is None
 
 
 def test_list_recent_sessions_reads_files(tmp_path, monkeypatch):
@@ -325,49 +327,137 @@ def test_warn_if_still_down_sends_once(monkeypatch):
 
 
 def test_shared_session_roundtrip(tmp_path, monkeypatch):
-    """共用会话 id：所有消息稳定复用同一会话；「新会话」删除映射轮换 id（不删文件）。"""
+    """共用会话 id：同一后端稳定复用；「新会话」轮换 id（不删文件）。"""
     import feishu_codex_bridge.bridge as bridge_mod
+    from feishu_codex_bridge.backend import get_backend
 
     monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", tmp_path / ".feishu_sessions.json")
+    claude = get_backend({"backend": "claude"})
 
-    sid1 = bridge_mod._shared_session_id()
-    sid2 = bridge_mod._shared_session_id()
+    sid1 = bridge_mod._shared_session_id(claude)
+    sid2 = bridge_mod._shared_session_id(claude)
     assert sid1 == sid2  # 共用会话稳定复用
-    assert sid1.startswith("session-feishu-")
+    assert claude.looks_like(sid1)  # claude 会话 id 是合法 UUID
 
-    bridge_mod._reset_shared_session()
-    sid3 = bridge_mod._shared_session_id()
+    bridge_mod._reset_shared_session(claude)
+    sid3 = bridge_mod._shared_session_id(claude)
     assert sid3 != sid1  # 重置后轮换到全新 id
 
-    # 重置只动映射、不删会话文件
+    # 重置只动映射、不删会话文件；映射为新版分区格式
     data = json.loads((tmp_path / ".feishu_sessions.json").read_text(encoding="utf-8"))
-    assert set(data.keys()) == {"shared", "shared_active_at"}
+    assert set(data.keys()) == {"sessions"}
+    assert set(data["sessions"].keys()) == {"claude"}
 
 
 def test_shared_session_idle_rotation(tmp_path, monkeypatch):
     """空闲超过阈值自动轮换新会话（会话结束）；未超时沿用同一会话。"""
     import feishu_codex_bridge.bridge as bridge_mod
+    from feishu_codex_bridge.backend import get_backend
 
     map_file = tmp_path / ".feishu_sessions.json"
     monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", map_file)
+    backend = get_backend({"backend": "claude"})
 
-    sid1 = bridge_mod._shared_session_id(idle_timeout_sec=600)
-    sid2 = bridge_mod._shared_session_id(idle_timeout_sec=600)  # 马上又来一条
+    sid1 = bridge_mod._shared_session_id(backend, idle_timeout_sec=600)
+    sid2 = bridge_mod._shared_session_id(backend, idle_timeout_sec=600)  # 马上又来一条
     assert sid2 == sid1  # 未超时沿用
 
-    # 把 last_active 拨到 10 分钟前 → 应轮换新会话
+    # 把 active_at 拨到 10 分钟前 → 应轮换新会话
     data = json.loads(map_file.read_text(encoding="utf-8"))
-    data["shared_active_at"] = time.time() - 601
+    data["sessions"]["claude"]["active_at"] = time.time() - 601
     map_file.write_text(json.dumps(data), encoding="utf-8")
-    sid3 = bridge_mod._shared_session_id(idle_timeout_sec=600)
+    sid3 = bridge_mod._shared_session_id(backend, idle_timeout_sec=600)
     assert sid3 != sid1  # 空闲超时自动开启新会话
 
     # 不传 idle_timeout 永不因空闲轮换
     data = json.loads(map_file.read_text(encoding="utf-8"))
-    data["shared_active_at"] = time.time() - 999999
+    data["sessions"]["claude"]["active_at"] = time.time() - 999999
     map_file.write_text(json.dumps(data), encoding="utf-8")
-    sid4 = bridge_mod._shared_session_id()
+    sid4 = bridge_mod._shared_session_id(backend)
     assert sid4 == sid3
+
+
+def test_session_map_migrates_legacy_flat_format(tmp_path, monkeypatch):
+    """旧 flat 格式自动迁移：旧 dsh 会话指针保留到 dsh 分区，不丢上下文。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+    from feishu_codex_bridge.backend import get_backend
+
+    map_file = tmp_path / ".feishu_sessions.json"
+    map_file.write_text(
+        json.dumps({"shared": "session-feishu-abc12345", "shared_active_at": 123.0}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", map_file)
+
+    claude = get_backend({"backend": "claude"})
+    sid = bridge_mod._shared_session_id(claude)
+    assert claude.looks_like(sid)  # claude 分区新建 UUID
+
+    data = json.loads(map_file.read_text(encoding="utf-8"))
+    assert data["sessions"]["dsh"]["id"] == "session-feishu-abc12345"
+    assert data["sessions"]["claude"]["id"] == sid
+
+
+def test_session_map_backends_isolated(tmp_path, monkeypatch):
+    """两个后端各存各的会话 id；重置/轮换互不影响。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+    from feishu_codex_bridge.backend import get_backend
+
+    monkeypatch.setattr(bridge_mod, "_SESSION_MAP_FILE", tmp_path / ".feishu_sessions.json")
+    claude = get_backend({"backend": "claude"})
+    dsh = get_backend({"backend": "dsh"})
+
+    c1 = bridge_mod._shared_session_id(claude)
+    d1 = bridge_mod._shared_session_id(dsh)
+    assert d1.startswith("session-feishu-")
+    assert c1 != d1
+
+    bridge_mod._reset_shared_session(claude)
+    assert bridge_mod._shared_session_id(dsh) == d1  # dsh 分区不受 claude 重置影响
+    assert bridge_mod._shared_session_id(claude) != c1
+
+
+def test_handle_message_dispatches_to_backend(monkeypatch):
+    """handle_message 按 backend 分派 run_task，并用动态标题发卡片。"""
+    import feishu_codex_bridge.bridge as bridge_mod
+    from feishu_codex_bridge.bridge import handle_message
+
+    calls = {}
+
+    def fake_run_task(backend, config, prompt, **kwargs):
+        calls.update(backend=backend, config=config, prompt=prompt, **kwargs)
+        return "结果文本"
+
+    sent_texts = []
+    cards = []
+    monkeypatch.setattr(bridge_mod, "run_task", fake_run_task)
+    monkeypatch.setattr(
+        bridge_mod, "send_text", lambda client, chat_id, text: sent_texts.append(text)
+    )
+    monkeypatch.setattr(
+        bridge_mod,
+        "send_card",
+        lambda client, chat_id, text, title=None: cards.append((text, title)),
+    )
+
+    config = {
+        "backend": "claude",
+        "workdir": "/tmp/x",
+        "allowed_open_ids": ["ou_test"],
+        "task_timeout_sec": 42,
+        "progress_interval_sec": 3,
+    }
+    handle_message(make_event("你好"), config, object())
+
+    assert calls["backend"].name == "claude"
+    assert calls["prompt"] == "你好"
+    assert calls["workdir"] == "/tmp/x"
+    assert calls["timeout"] == 42
+    assert calls["progress_interval"] == 3
+    assert calls["session_id"]  # 固定会话 id 已生成
+    assert any("Claude 开始处理" in t for t in sent_texts)
+    assert cards and cards[0][0] == "结果文本"
+    assert cards[0][1] == "🤖 Claude 执行结果"
 
 
 def test_single_instance_guard(tmp_path, monkeypatch):

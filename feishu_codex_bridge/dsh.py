@@ -58,6 +58,7 @@ def run_dsh(
         cmd,
         cwd=workdir,
         env=env,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

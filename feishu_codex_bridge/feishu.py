@@ -174,12 +174,13 @@ def _md_to_card_elements(text: str) -> list:
     return elements or [{"tag": "markdown", "content": text}]
 
 
-def send_card(client: lark.Client, chat_id: str, text: str) -> None:
+def send_card(client: lark.Client, chat_id: str, text: str, title: str = "🤖 DSH 执行结果") -> None:
     """用飞书消息卡片发送内容，markdown 会被渲染（表格转 column_set 多列组件）。
 
     - 卡片 markdown 支持：加粗、行内代码、列表、链接、引用、标题。
     - 表格不支持 → 转成原生 column_set 组件（表头加粗、多列并排）。
     - 简单消息（无 markdown 特征）退化为纯文本发送。
+    - title 为卡片标题（调用方按当前后端传 "🤖 Claude/DSH 执行结果"）。
     """
     elements = _md_to_card_elements(text)
     has_md = any(
@@ -193,7 +194,7 @@ def send_card(client: lark.Client, chat_id: str, text: str) -> None:
     card = {
         "config": {"wide_screen_mode": True},
         "header": {
-            "title": {"tag": "plain_text", "content": "🤖 DSH 执行结果"},
+            "title": {"tag": "plain_text", "content": title},
             "template": "blue",
         },
         "elements": elements,

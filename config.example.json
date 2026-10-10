@@ -3,9 +3,16 @@
   "app_secret": "请填写你的AppSecret",
   "allowed_open_ids": [],
   "allowed_chat_ids": [],
+  "backend": "claude",
+  "claude_bin": "",
+  "claude_permission_mode": "bypassPermissions",
+  "claude_model": "",
+  "claude_env": {
+    "ANTHROPIC_AUTH_TOKEN": "请填写你的 ANTHROPIC_AUTH_TOKEN"
+  },
   "dsh_bin": "",
-  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
   "dsh_permission_mode": "danger-full-access",
+  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
   "session_idle_timeout_min": 0,
   "task_timeout_sec": 300,
   "progress_interval_sec": 10,

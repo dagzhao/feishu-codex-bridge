@@ -14,7 +14,7 @@ import lark_oapi as lark
 from lark_oapi.api.im.v1.model.p2_im_message_receive_v1 import P2ImMessageReceiveV1
 from lark_oapi.ws import Client as WSClient
 
-from .dsh import run_dsh
+from .backend import BACKENDS, Backend, get_backend, run_task
 from .config import load_config, setup_logging
 from .feishu import (
     build_lark_client,
@@ -41,19 +41,20 @@ _LONG_DISCONNECT_WARN_SEC = 60.0
 
 _CLEAR_CMDS = ("新会话", "退出会话", "结束会话", "退出当前会话", "重置会话")
 
-# 固定会话：DSH headless 通过 DSH_SESSION_ID 复用持久化会话（真·续聊）。
-# 所有飞书消息共用一个固定会话 id（不区分用户），映射存本地
-# .feishu_sessions.json；「新会话」删除映射（轮换 id），下次对话走全新
-# 会话。旧会话文件保留在 ~/.dsh/sessions，由 DSH 侧（web 插件）负责
-# 删除，桥接层不再删任何会话文件。映射文件存本地，避免与 DSH 的
-# ~/.dsh/sessions 混淆。
+# 固定会话：所有飞书消息共用一个固定会话 id（不区分用户），映射存本地
+# .feishu_sessions.json，**按后端分区**（claude / dsh 各存各的 id，切换
+# 后端互不覆盖；旧版 flat 格式在首次读写时自动迁移，历史 dsh 会话指针
+# 保留）。「新会话」只轮换当前后端的 id，下次对话走全新会话。会话文件
+# （claude 在 ~/.claude/projects，dsh 在 ~/.dsh/sessions）由各自侧管理，
+# 桥接层不删任何会话文件。
 #
 # 会话生命周期（2026-08-22 起）：默认**永不因空闲自动轮换**——只有
-# 消息为「新会话」等命令时才轮换到全新会话 id（旧会话保留在
-# ~/.dsh/sessions，由 DSH 侧删除）。若在 config.json 显式配置
-# session_idle_timeout_min > 0，则仍按该分钟数空闲自动轮换
+# 消息为「新会话」等命令时才轮换到全新会话 id。若在 config.json 显式
+# 配置 session_idle_timeout_min > 0，则仍按该分钟数空闲自动轮换
 # （可选兼容行为，默认 0 = 不轮换）。
 _SESSION_MAP_FILE = Path(__file__).resolve().parent.parent / ".feishu_sessions.json"
+_SESSIONS_KEY = "sessions"
+# 旧版 flat 格式的键（一次性迁移用，见 _migrate_legacy_map）。
 _SHARED_SESSION_KEY = "shared"
 _SHARED_ACTIVE_KEY = "shared_active_at"
 
@@ -62,7 +63,7 @@ _PID_FILE = Path(__file__).resolve().parent.parent / ".bridge.pid"
 # 持有 flock 的文件对象（保持引用防止被 GC 关闭而释放锁）。
 _PID_LOCK_FH = None
 
-# 所有消息共用同一会话后，并发 run_dsh 会互相覆盖上下文，串行执行保证安全。
+# 所有消息共用同一会话后，并发 run_task 会互相覆盖上下文，串行执行保证安全。
 _RUN_LOCK = threading.Lock()
 
 
@@ -141,20 +142,66 @@ def _mark_processed(message_id: str) -> bool:
     return False
 
 
-def _shared_session_id(idle_timeout_sec: Optional[float] = None) -> str:
-    """读取（或创建）所有飞书消息共用的固定 DSH 会话 id。
-
-    idle_timeout_sec 非空时：距上次消息超过该时长 → 自动轮换到全新会话 id
-    （旧会话结束）；未超时 → 沿用并刷新 last_active。为 None 则永不因空闲
-    轮换（只有「新会话」命令强制重置）。
-    """
+def _load_session_map() -> dict:
+    """读取会话映射文件（缺失/损坏 → 空 dict）。"""
     try:
         data = json.loads(_SESSION_MAP_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         data = {}
-    now = time.time()
+    return data if isinstance(data, dict) else {}
+
+
+def _save_session_map(data: dict) -> None:
+    try:
+        _SESSION_MAP_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        LOGGER.exception("保存会话映射失败")
+
+
+def _migrate_legacy_map(data: dict) -> dict:
+    """旧版 flat 格式（shared/shared_active_at）→ 按后端分区的新格式。
+
+    按各后端的 id 格式把旧共用 id 归入对应分区（例如
+    ``session-feishu-xxx`` 归 dsh 分区，UUID 归 claude 分区）；无法识别
+    则丢弃该 id（等同新会话）。已有 ``sessions`` 键则原样返回。
+    """
+    if _SESSIONS_KEY in data:
+        return data
+    sessions: dict = {}
     sid = data.get(_SHARED_SESSION_KEY)
-    last = data.get(_SHARED_ACTIVE_KEY)
+    if sid:
+        for backend in BACKENDS.values():
+            if backend.looks_like(str(sid)):
+                sessions[backend.name] = {
+                    "id": str(sid),
+                    "active_at": data.get(_SHARED_ACTIVE_KEY),
+                }
+                break
+    return {_SESSIONS_KEY: sessions}
+
+
+def _shared_session_id(backend: Backend, idle_timeout_sec: Optional[float] = None) -> str:
+    """读取（或创建）当前后端共用的固定会话 id。
+
+    idle_timeout_sec 非空时：距上次消息超过该时长 → 自动轮换到全新会话 id
+    （旧会话结束）；未超时 → 沿用并刷新 active_at。为 None 则永不因空闲
+    轮换（只有「新会话」命令强制重置）。分区内格式不符当前后端的脏数据
+    视为无效并重建。调用方需持有 _RUN_LOCK（同一会话不能并发写）。
+    """
+    data = _migrate_legacy_map(_load_session_map())
+    sessions = data.setdefault(_SESSIONS_KEY, {})
+    now = time.time()
+    entry = sessions.get(backend.name)
+    sid = None
+    last = None
+    if isinstance(entry, dict):
+        sid = entry.get("id")
+        last = entry.get("active_at")
+    if sid and not backend.looks_like(str(sid)):
+        LOGGER.warning("会话 id %r 不符合 %s 后端格式，视为无效并重建", sid, backend.name)
+        sid = None
     if sid and idle_timeout_sec and last is not None:
         try:
             idle = now - float(last)
@@ -164,48 +211,34 @@ def _shared_session_id(idle_timeout_sec: Optional[float] = None) -> str:
             LOGGER.info("会话空闲 %.0f 秒（>%.0f），自动开启新会话", idle, idle_timeout_sec)
             sid = None
     if not sid:
-        import uuid
-        sid = f"session-feishu-{uuid.uuid4().hex[:8]}"
-    data[_SHARED_SESSION_KEY] = sid
-    data[_SHARED_ACTIVE_KEY] = now
-    try:
-        _SESSION_MAP_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        LOGGER.exception("保存会话映射失败")
+        sid = backend.new_session_id()
+    sessions[backend.name] = {"id": sid, "active_at": now}
+    _save_session_map(data)
     return sid
 
 
-def _reset_shared_session() -> None:
-    """重置共用会话：只删除映射（轮换 id），不删任何会话文件。
+def _reset_shared_session(backend: Backend) -> None:
+    """重置当前后端的共用会话映射（轮换 id）；其它后端分区保留。
 
-    旧会话文件保留在 ~/.dsh/sessions，由 DSH 侧（web 插件/手动）删除。
+    旧会话文件（claude 在 ~/.claude/projects，dsh 在 ~/.dsh/sessions）
+    由各自侧管理，桥接层不删任何会话文件。
     """
-    try:
-        data = json.loads(_SESSION_MAP_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    data.pop(_SHARED_SESSION_KEY, None)
-    data.pop(_SHARED_ACTIVE_KEY, None)
-    try:
-        _SESSION_MAP_FILE.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        LOGGER.exception("保存会话映射失败")
+    data = _migrate_legacy_map(_load_session_map())
+    sessions = data.get(_SESSIONS_KEY) or {}
+    sessions.pop(backend.name, None)
+    data[_SESSIONS_KEY] = sessions
+    _save_session_map(data)
 
 
-def handle_commands(prompt: str) -> Optional[str]:
+def handle_commands(prompt: str, backend: Backend) -> Optional[str]:
     """处理会话管理命令；返回回复文本，非命令消息返回 None。
 
-    DSH headless 现在支持固定会话续聊（DSH_SESSION_ID 环境变量）：
-    「新会话」删除共用会话映射（轮换 id），下次对话走全新上下文；
-    旧会话文件交由 DSH 侧删除，桥接层不删任何会话。
+    「新会话」删除当前后端的共用会话映射（轮换 id），下次对话走全新
+    上下文；旧会话文件由各自后端侧保留，桥接层不删任何会话。
     """
     prompt = prompt.strip()
     if prompt in _CLEAR_CMDS:
-        _reset_shared_session()
+        _reset_shared_session(backend)
         return "🆕 已开启新会话：下次对话将使用全新上下文。"
     return None
 
@@ -220,14 +253,15 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
         return
     _remember_chat(chat_id)
 
+    backend = get_backend(config)
     open_id = open_id_of(event)
-    command_reply = handle_commands(prompt)
+    command_reply = handle_commands(prompt, backend)
     if command_reply is not None:
         LOGGER.info("命令处理: open_id=%s 命令=%s", open_id, prompt.strip()[:50])
         send_text(client, chat_id, command_reply)
         return
 
-    send_text(client, chat_id, f"🧠 收到指令，DSH 开始处理：\n{prompt[:500]}")
+    send_text(client, chat_id, f"🧠 收到指令，{backend.label} 开始处理：\n{prompt[:500]}")
 
     def _send_progress(text: str) -> None:
         try:
@@ -241,20 +275,20 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
     idle_min = float(config.get("session_idle_timeout_min", 0) or 0)
     idle_sec = idle_min * 60 if idle_min > 0 else None
     with _RUN_LOCK:
-        result = run_dsh(
+        result = run_task(
+            backend,
+            config,
             prompt,
-            config["dsh_bin"],
-            config["workdir"],
-            int(config.get("task_timeout_sec", 300)),
+            workdir=config["workdir"],
+            timeout=int(config.get("task_timeout_sec", 300)),
             on_progress=_send_progress,
             progress_interval=float(config.get("progress_interval_sec", 10)),
-            session_id=_shared_session_id(idle_timeout_sec=idle_sec),
-            permission_mode=config.get("dsh_permission_mode", "danger-full-access"),
+            session_id=_shared_session_id(backend, idle_timeout_sec=idle_sec),
         )
     max_len = int(config.get("max_reply_len", 3500))
     if len(result) > max_len:
         result = result[:max_len] + "\n\n…(结果过长已截断)"
-    send_card(client, chat_id, result)
+    send_card(client, chat_id, result, title=f"🤖 {backend.label} 执行结果")
 
 
 def make_handler(config: dict, client: lark.Client):
@@ -310,7 +344,7 @@ def main() -> None:
     config = load_config()
     setup_logging(config)
     _acquire_single_instance()
-    LOGGER.info("飞书桥接服务启动: app_id=%s", config["app_id"])
+    LOGGER.info("飞书桥接服务启动: app_id=%s backend=%s", config["app_id"], config.get("backend"))
     client = build_lark_client(config)
 
     def _on_reconnecting() -> None:

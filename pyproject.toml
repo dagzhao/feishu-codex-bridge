@@ -1,7 +1,7 @@
 [project]
 name = "feishu-codex-bridge"
 version = "0.1.0"
-description = "飞书远程控制 Codex 桥接服务"
+description = "飞书远程控制桥接服务（Claude Code / DSH headless 双后端）"
 requires-python = ">=3.10"
 dependencies = [
     "lark-oapi>=1.3.0",
