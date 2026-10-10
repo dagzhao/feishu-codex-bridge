@@ -50,6 +50,10 @@
   `launchctl kickstart -k gui/501/com.dsh.feishu-bridge`
   （plist 在 `~/Library/LaunchAgents/com.dsh.feishu-bridge.plist`；直接 `kill`
   会被 KeepAlive 重新拉起）
+- 更换 claude token：`.venv/bin/python update_token.py`（从 `~/.zshrc` 同步；
+  也可 `... update_token.py <新token>`）——写 `config.json` 的 `claude_env`、
+  `chmod 600`、kickstart 重启服务，不打印 token；步骤详见 README
+  「更换 ANTHROPIC_AUTH_TOKEN」
 - 手工后台运行（不用 LaunchAgent 时）：
   `nohup bash -c 'exec .venv/bin/python -m feishu_codex_bridge' >> bridge.log 2>&1 &`
   （直接 `nohup .venv/bin/python -m ... &` 在本环境会被二次拉起成双进程；bridge 自带

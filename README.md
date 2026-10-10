@@ -159,6 +159,38 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
 - 遗留配置项 `session_cleanup_max_age_hours` / `session_cleanup_interval_hours`
   已不再使用，可保留可删除。
 
+## 五、更换 ANTHROPIC_AUTH_TOKEN（token / key）
+
+claude 的认证 token 存在 `config.json` 的 `claude_env.ANTHROPIC_AUTH_TOKEN`
+（由 launchd 环境下的桥接进程注入给 claude 子进程，**不读** `~/.zshrc`）。
+
+推荐步骤（一条命令）：
+
+1. 先在 `~/.zshrc` 里更新：`export ANTHROPIC_AUTH_TOKEN="sk-新token"`
+   （如果你在终端里也用 claude，这一步本来就要做）
+2. 同步到桥接并重启服务：
+
+   ```bash
+   cd ~/Documents/harnessWorkSpace/feishu-bridge
+   .venv/bin/python update_token.py
+   ```
+
+   也可以直接指定新 token（注意：会留在 shell 历史里，推荐走 zshrc）：
+
+   ```bash
+   .venv/bin/python update_token.py sk-新token
+   ```
+
+3. 脚本会自动完成：写入 `config.json`（并 `chmod 600`）+ `launchctl kickstart`
+   重启服务。到飞书发一条消息验证即可（日志见 `bridge.log`）。
+
+手动方式（等价，不想用脚本时）：编辑 `config.json` 的
+`claude_env.ANTHROPIC_AUTH_TOKEN` 为新值，然后：
+
+```bash
+launchctl kickstart -k gui/501/com.dsh.feishu-bridge
+```
+
 ## 安全说明
 
 - 机器人能调用本机 Claude Code / DSH 的全部能力（含文件读写），**务必填写
