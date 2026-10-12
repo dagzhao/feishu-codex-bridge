@@ -9,6 +9,10 @@
 
 认证：claude 需要 ANTHROPIC_AUTH_TOKEN（本机配在 ~/.zshrc，launchd 启动的
 桥接进程拿不到），由桥接层通过 config 的 claude_env 注入子进程环境。
+
+备用 key：config 的 claude_env_backup 可配一组备用环境变量；主 key 执行
+失败（非超时）时自动叠加备用环境重试一次（主 token 失效/额度耗尽时自动
+切到备用 key），结果里会明确标注「已切换备用 key」。
 """
 
 import json
@@ -20,7 +24,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 LOGGER = logging.getLogger("feishu_codex_bridge.claude")
 
@@ -176,6 +180,7 @@ def run_claude(
     session_id: Optional[str] = None,
     permission_mode: Optional[str] = "bypassPermissions",
     extra_env: Optional[dict] = None,
+    backup_env: Optional[dict] = None,
     model: Optional[str] = None,
 ) -> str:
     """运行 claude headless 并返回最终答复文本。
@@ -188,6 +193,9 @@ def run_claude(
     permission_mode 为 bypassPermissions（默认）时传
     --dangerously-skip-permissions，其它非空值传 --permission-mode <值>。
     extra_env 非空时叠加进子进程环境（用于注入 ANTHROPIC_AUTH_TOKEN）。
+    backup_env 非空时作为「备用 key」：主执行失败（非超时）后叠加它重试
+    一次，用于主 token 失效/额度耗尽时自动切换；超时不重试（任务可能
+    仍在执行，重试会重复执行/丢上下文）。
     model 非空时传 --model（默认留空 = 用 claude CLI 的当前默认模型）。
 
     progress_interval 保留参数以兼容 run_dsh 的调用签名（claude JSON 模式
@@ -202,6 +210,68 @@ def run_claude(
             "claude 调用可能认证失败（launchd 环境需在 config.json 的 claude_env 中注入）"
         )
 
+    result = _run_attempts(
+        prompt,
+        claude_bin,
+        workdir,
+        timeout,
+        env,
+        on_progress,
+        session_id=session_id,
+        permission_mode=permission_mode,
+        model=model,
+    )
+
+    if result.failed and not result.timed_out and backup_env:
+        LOGGER.warning("主 key 执行失败（%s），改用备用 key 重试", result.text[:200])
+        _notify_progress(on_progress, "⚠️ 主 key 执行失败，已自动切换备用 key 重试…")
+        env_backup = dict(env)
+        env_backup.update({str(k): str(v) for k, v in backup_env.items()})
+        retry = _run_attempts(
+            prompt,
+            claude_bin,
+            workdir,
+            timeout,
+            env_backup,
+            on_progress,
+            session_id=session_id,
+            permission_mode=permission_mode,
+            model=model,
+        )
+        if not retry.failed:
+            return "⚠️ 主 key 出错，已自动切换备用 key 完成本次任务：\n\n" + retry.text
+        return (
+            retry.text
+            + "\n\n（备用 key 也执行失败；主 key 的原始错误："
+            + result.text[:300]
+            + "）"
+        )
+
+    return result.text
+
+
+class _AttemptResult(NamedTuple):
+    text: str
+    failed: bool
+    timed_out: bool
+
+
+def _run_attempts(
+    prompt: str,
+    claude_bin: str,
+    workdir: str,
+    timeout: int,
+    env: dict,
+    on_progress: Optional[Callable[[str], None]],
+    *,
+    session_id: Optional[str],
+    permission_mode: Optional[str],
+    model: Optional[str],
+) -> _AttemptResult:
+    """在同一套子进程环境里跑会话尝试序列（resume/create 互备）。
+
+    返回 (文本, 是否失败, 是否超时)；失败包括退出码非 0 与结果 JSON is_error。
+    """
     deadline = time.monotonic() + timeout
     if session_id is None:
         attempts = [False]  # 无会话模式：与 dsh 的「一次性任务」语义一致
@@ -232,15 +302,21 @@ def run_claude(
         rc, out, err, timed_out = _run_once(cmd, workdir, env, budget)
 
         if timed_out:
-            # 超时说明任务可能仍在工作，回退换会话等于丢上下文，绝不回退。
-            return f"⚠️ Claude 任务超过 {timeout} 秒未完成，已终止。可以换更简单的指令重试。"
+            # 超时说明任务可能仍在工作，回退换会话/换 key 等于丢上下文，绝不回退。
+            return _AttemptResult(
+                f"⚠️ Claude 任务超过 {timeout} 秒未完成，已终止。可以换更简单的指令重试。",
+                True,
+                True,
+            )
 
         if rc == 0:
             data = _parse_result(out)
             if data is not None:
-                return _format_result(data)
+                return _AttemptResult(
+                    _format_result(data), bool(data.get("is_error")), False
+                )
             # 非 JSON 输出（理论上不会发生）：原样透传
-            return out.strip() or err.strip() or "✅ 处理完成。"
+            return _AttemptResult(out.strip() or err.strip() or "✅ 处理完成。", False, False)
 
         has_next = idx + 1 < len(attempts)
         if has_next and _should_flip(err, tried_resume=resume):
@@ -254,10 +330,12 @@ def run_claude(
 
         detail = (err or "").strip() or (out or "").strip()
         if detail:
-            return f"❌ Claude 执行失败（退出码 {rc}）：\n{detail[-1500:]}"
-        return f"❌ Claude 执行失败（退出码 {rc}），无输出。"
+            return _AttemptResult(
+                f"❌ Claude 执行失败（退出码 {rc}）：\n{detail[-1500:]}", True, False
+            )
+        return _AttemptResult(f"❌ Claude 执行失败（退出码 {rc}），无输出。", True, False)
 
-    return "❌ Claude 执行失败：未知错误。"  # 理论不可达（循环内必 return）
+    return _AttemptResult("❌ Claude 执行失败：未知错误。", True, False)
 
 
 def _should_flip(err: str, *, tried_resume: bool) -> bool:

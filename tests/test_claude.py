@@ -252,3 +252,65 @@ def test_missing_binary_raises_filenotfound(tmp_path):
         run_claude(
             "你好", str(tmp_path / "no-such-claude"), str(tmp_path), timeout=5, session_id=None
         )
+
+
+def test_backup_env_retried_after_primary_failure(tmp_path):
+    """主 key 失败（非超时）→ 自动叠加 backup_env 重试一次并标注已切换。"""
+    script = """#!/bin/sh
+echo "$ANTHROPIC_AUTH_TOKEN" >> tokens.log
+if [ "$ANTHROPIC_AUTH_TOKEN" = "k-primary" ]; then
+  echo '{"result":"API Error: 401 invalid api key","is_error":true}'
+else
+  echo '{"result":"备用成功","is_error":false}'
+fi
+"""
+    result = run_claude(
+        "任务",
+        _fake_claude(tmp_path, script),
+        str(tmp_path),
+        timeout=30,
+        extra_env={"ANTHROPIC_AUTH_TOKEN": "k-primary"},
+        backup_env={"ANTHROPIC_AUTH_TOKEN": "k-backup"},
+    )
+    assert "备用成功" in result and "已自动切换备用 key" in result
+    tokens = (tmp_path / "tokens.log").read_text(encoding="utf-8").splitlines()
+    assert tokens == ["k-primary", "k-backup"]
+
+
+def test_backup_env_not_used_on_success(tmp_path):
+    """主 key 成功时不触发备用 key（只跑一次）。"""
+    script = """#!/bin/sh
+echo "$ANTHROPIC_AUTH_TOKEN" >> tokens.log
+echo '{"result":"正常","is_error":false}'
+"""
+    result = run_claude(
+        "任务",
+        _fake_claude(tmp_path, script),
+        str(tmp_path),
+        timeout=30,
+        extra_env={"ANTHROPIC_AUTH_TOKEN": "k-primary"},
+        backup_env={"ANTHROPIC_AUTH_TOKEN": "k-backup"},
+    )
+    assert result == "正常"
+    tokens = (tmp_path / "tokens.log").read_text(encoding="utf-8").splitlines()
+    assert tokens == ["k-primary"]
+
+
+def test_backup_env_not_used_on_timeout(tmp_path):
+    """超时不触发备用 key（任务可能仍在执行，重试会重复执行）。"""
+    script = """#!/bin/sh
+echo "$ANTHROPIC_AUTH_TOKEN" >> tokens.log
+sleep 5
+echo '{"result":"late","is_error":false}'
+"""
+    result = run_claude(
+        "任务",
+        _fake_claude(tmp_path, script),
+        str(tmp_path),
+        timeout=1,
+        extra_env={"ANTHROPIC_AUTH_TOKEN": "k-primary"},
+        backup_env={"ANTHROPIC_AUTH_TOKEN": "k-backup"},
+    )
+    assert "超过 1 秒" in result
+    tokens = (tmp_path / "tokens.log").read_text(encoding="utf-8").splitlines()
+    assert tokens == ["k-primary"]

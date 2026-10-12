@@ -52,6 +52,7 @@ class Backend:
     looks_like: Callable[[str], bool]
     run: Callable[..., str]
     env_key: Optional[str] = None  # config 里额外注入子进程环境变量的键（可空）
+    backup_env_key: Optional[str] = None  # config 里备用环境变量的键（主 key 失败时叠加重试）
     model_key: Optional[str] = None  # config 里模型名的键（可空；留空 = 用后端默认模型）
 
 
@@ -66,6 +67,7 @@ BACKENDS: dict[str, Backend] = {
         looks_like=_looks_like_uuid,
         run=run_claude,
         env_key="claude_env",
+        backup_env_key="claude_env_backup",
         model_key="claude_model",
     ),
     "dsh": Backend(
@@ -109,6 +111,10 @@ def run_task(
         env = config.get(backend.env_key)
         if isinstance(env, dict) and env:
             kwargs["extra_env"] = env
+    if backend.backup_env_key:
+        backup = config.get(backend.backup_env_key)
+        if isinstance(backup, dict) and backup:
+            kwargs["backup_env"] = backup
     if backend.model_key:
         model = config.get(backend.model_key)
         if model:

@@ -10,6 +10,7 @@
   "claude_env": {
     "ANTHROPIC_AUTH_TOKEN": "请填写你的 ANTHROPIC_AUTH_TOKEN"
   },
+  "claude_env_backup": {},
   "dsh_bin": "",
   "dsh_permission_mode": "danger-full-access",
   "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",

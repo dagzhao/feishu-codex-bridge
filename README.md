@@ -201,3 +201,14 @@ launchctl kickstart -k gui/501/com.dsh.feishu-bridge
 - 停止服务：`launchctl bootout gui/501/com.dsh.feishu-bridge`（LaunchAgent
   托管时直接 `kill` 会被 KeepAlive 重新拉起）；手工部署的用
   `pkill -f feishu_codex_bridge`。
+
+## 备用 key 自动回退（claude 后端）
+
+- `config.json` 可加一组 `claude_env_backup`（格式同 `claude_env`）作为**备用
+  key**：主 key 执行失败（**非超时**）时，桥接会自动叠加备用环境**重试一次**，
+  过程和结果里都会标注「已自动切换备用 key」。
+- 超时**不**回退：任务可能仍在执行，重发会重复执行/丢上下文。
+- 典型场景：主 `ANTHROPIC_AUTH_TOKEN` 额度耗尽或失效（401/402 等）时自动切到
+  备用 key（例如 DSH 在用的 DeepSeek 官方 key）。
+- 前提：备用 key 必须对**同一个** `ANTHROPIC_BASE_URL` 有效（两边都是 DeepSeek
+  官方 Anthropic 兼容端点 `https://api.deepseek.com/anthropic` 时通用）。
