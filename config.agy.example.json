@@ -9,7 +9,7 @@
   "agy_permission_mode": "bypassPermissions",
   "agy_model": "",
   "agy_effort": "high",
-  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
+  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace-agy",
   "session_idle_timeout_min": 0,
   "task_timeout_sec": 600,
   "progress_interval_sec": 10,

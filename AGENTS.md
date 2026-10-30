@@ -31,7 +31,7 @@
 - **可执行文件解析**：`claude_bin` 留空时自动解析（PATH → `~/.local/bin/claude`，
   launchd 的 PATH 不含后者，靠此兜底到绝对路径）；`dsh_bin` 留空时
   PATH → npx 缓存扫描。
-- 桥接工作目录（`workdir`）为独立飞书工作区 `~/Documents/feishu-workspace`。
+- 桥接工作目录（`workdir`）：Bot 1（DSH）为独立工作区 `~/Documents/feishu-workspace-dsh`，Bot 2（Antigravity）为独立工作区 `~/Documents/feishu-workspace-agy`。
 - 权限：`claude_permission_mode`（默认 `bypassPermissions` → 传
   `--dangerously-skip-permissions`，其它值传 `--permission-mode`）；
   `dsh_permission_mode`（默认 `danger-full-access`）经 `DSH_PERMISSION_MODE`

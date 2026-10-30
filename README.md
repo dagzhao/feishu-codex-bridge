@@ -40,8 +40,7 @@
    - `dsh_bin`：DSH CLI 可执行文件路径（仅 backend=dsh 时使用；可留空，留空
      或路径失效时自动解析：优先 PATH 上的 `dsh`，其次扫描
      `~/.npm/_npx/*/node_modules/.bin/dsh` 取最新）
-   - `workdir`：任务执行的工作目录（当前为独立飞书工作区
-     `~/Documents/feishu-workspace`）
+   - `workdir`：任务执行的工作目录（Bot 1 默认 `~/Documents/feishu-workspace-dsh`，Bot 2 默认 `~/Documents/feishu-workspace-agy`）
    - `dsh_permission_mode`：dsh headless 沙箱文件策略，默认
      `danger-full-access`（仅 backend=dsh 时使用）
    - `session_idle_timeout_min`：会话空闲自动轮换时间（分钟），默认 0 =

@@ -13,7 +13,7 @@
   "claude_env_backup": {},
   "dsh_bin": "",
   "dsh_permission_mode": "danger-full-access",
-  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
+  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace-dsh",
   "session_idle_timeout_min": 0,
   "task_timeout_sec": 300,
   "progress_interval_sec": 10,
