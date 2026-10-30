@@ -12,7 +12,11 @@
 后端侧管理（桥接不删会话文件）。切换 backend 时两个分区各自保留，切回来
 仍能延续该后端的上下文。
 
-- **claude 后端**（默认）：首次消息 `--session-id <uuid>` 创建会话，之后
+- **agy 后端**（Antigravity CLI）：`agy -p <prompt> --output-format json` 执行非交互任务；
+  首轮对话自动生成会话 id，后续多轮通过 `--conversation <uuid>` 延续；权限默认
+  `bypassPermissions`（映射为 `--dangerously-skip-permissions`）；支持独立机器人配置
+  `config.agy.json` 与 LaunchAgent `com.antigravity.feishu-bridge`。
+- **claude 后端**：首次消息 `--session-id <uuid>` 创建会话，之后
   `--resume <uuid>` 续聊（会话文件在 `~/.claude/projects/<workdir 转义>/`）；
   双向自动回退：resume 报 `No conversation found` → 改 create，create 报
   `already in use` → 改 resume；超时绝不回退（会话可能仍在工作中）。
@@ -42,12 +46,13 @@
 
 ## 常用命令
 
-- 项目位置：`/Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge`
+- 项目位置：`/Users/zhaojingtao/Documents/feishu-bridge`
 - 安装依赖（开发模式）：`python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"`
 - 运行：`cd <项目位置> && .venv/bin/python -m feishu_codex_bridge`
 - 测试：`cd <项目位置> && .venv/bin/python -m pytest`
 - 重启线上服务（LaunchAgent 托管，RunAtLoad + KeepAlive）：
-  `launchctl kickstart -k gui/501/com.dsh.feishu-bridge`
+  - DSH 机器人：`launchctl kickstart -k gui/501/com.dsh.feishu-bridge`
+  - Antigravity 机器人：`launchctl kickstart -k gui/501/com.antigravity.feishu-bridge`
   （plist 在 `~/Library/LaunchAgents/com.dsh.feishu-bridge.plist`；直接 `kill`
   会被 KeepAlive 重新拉起）
 - 更换 claude token：`.venv/bin/python update_token.py`（从 `~/.zshrc` 同步；

@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from .agy import run_agy
 from .claude import run_claude
 from .dsh import run_dsh
 
@@ -54,6 +55,7 @@ class Backend:
     env_key: Optional[str] = None  # config 里额外注入子进程环境变量的键（可空）
     backup_env_key: Optional[str] = None  # config 里备用环境变量的键（主 key 失败时叠加重试）
     model_key: Optional[str] = None  # config 里模型名的键（可空；留空 = 用后端默认模型）
+    effort_key: Optional[str] = None  # config 里推理深度/思考深度的键（可空）
 
 
 BACKENDS: dict[str, Backend] = {
@@ -80,6 +82,19 @@ BACKENDS: dict[str, Backend] = {
         looks_like=_looks_like_dsh_session,
         run=run_dsh,
     ),
+    "agy": Backend(
+        name="agy",
+        label="Antigravity",
+        bin_key="agy_bin",
+        perm_key="agy_permission_mode",
+        default_perm="bypassPermissions",
+        new_session_id=lambda: "",
+        looks_like=_looks_like_uuid,
+        run=run_agy,
+        env_key="agy_env",
+        model_key="agy_model",
+        effort_key="agy_effort",
+    ),
 }
 
 
@@ -103,6 +118,7 @@ def run_task(
     on_progress: Optional[Callable[[str], None]] = None,
     progress_interval: float = 10.0,
     session_id: Optional[str] = None,
+    on_session_id: Optional[Callable[[str], None]] = None,
 ) -> str:
     """按后端元数据取配置并执行任务；可执行文件缺失时返回友好文案。"""
     bin_path = config.get(backend.bin_key) or backend.name
@@ -119,6 +135,12 @@ def run_task(
         model = config.get(backend.model_key)
         if model:
             kwargs["model"] = model
+    if backend.effort_key:
+        effort = config.get(backend.effort_key)
+        if effort:
+            kwargs["effort"] = effort
+    if on_session_id is not None:
+        kwargs["on_session_id"] = on_session_id
     try:
         return backend.run(
             prompt,

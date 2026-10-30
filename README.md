@@ -1,13 +1,10 @@
-# 飞书远程控制桥接服务（Claude Code / DSH 双后端）
+# 飞书远程控制桥接服务（Claude Code / DSH / Antigravity 多后端 & 双机器人并行）
 
-在飞书里给机器人发消息，自动调用本机 **Claude Code**（`claude -p` headless
-模式）执行任务，并把结果发回飞书。无需公网 IP、无需域名、无需回调服务器
-（使用飞书官方长连接）。
+在飞书里给机器人发消息，自动调用本机 **Antigravity**（`agy -p` headless 模式）、**Claude Code** 或 **DSH** 执行任务，并把结果发回飞书。无需公网 IP、无需域名、无需回调服务器（使用飞书官方 WebSocket 长连接）。
 
-> 后端演进：Codex → DSH（`dsh --profile headless`）→ **Claude Code**（当前
-> 默认）。通过 `config.json` 的 `backend` 开关可在 `claude` / `dsh` 之间
-> 切换；所有后端都支持**固定会话续聊**（所有飞书消息共用一个持久化会话，
-> 真·多轮上下文），见下文「固定会话续聊」。
+> 后端演进：Codex → DSH（`dsh --profile headless`）→ Claude Code（`claude -p`）→ **Antigravity**（`agy -p`）。
+> 支持单应用后端切换，也支持**独立双机器人并行运行**（如一个小Q连 DSH、一个编程Q连 Antigravity，互不干扰）。
+> 所有后端都支持**固定会话续聊**（所有飞书消息共用一个持久化会话，真·多轮上下文），直到发送「新对话」或「新会话」才重置。
 
 ## 一、飞书开放平台配置（一次）
 
@@ -61,7 +58,7 @@
 首次安装依赖（已装好可跳过）：
 
 ```bash
-cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge
+cd /Users/zhaojingtao/Documents/feishu-bridge
 python3 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 ```
@@ -69,14 +66,14 @@ python3 -m venv .venv
 启动：
 
 ```bash
-cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge
+cd /Users/zhaojingtao/Documents/feishu-bridge
 .venv/bin/python -m feishu_codex_bridge
 ```
 
 保持后台运行（手动）：
 
 ```bash
-cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge
+cd /Users/zhaojingtao/Documents/feishu-bridge
 nohup bash -c 'exec .venv/bin/python -m feishu_codex_bridge' >> bridge.log 2>&1 &
 ```
 
@@ -87,7 +84,7 @@ nohup bash -c 'exec .venv/bin/python -m feishu_codex_bridge' >> bridge.log 2>&1 
 运行测试：
 
 ```bash
-cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/python -m pytest
+cd /Users/zhaojingtao/Documents/feishu-bridge && .venv/bin/python -m pytest
 ```
 
 > 实际部署（本机）：服务由 LaunchAgent `com.dsh.feishu-bridge` 托管
@@ -129,11 +126,9 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
 
 ### 固定会话续聊（真·多轮上下文）
 
-桥接层为每个后端维护一个固定会话 id（存 `.feishu_sessions.json`，**按后端
-分区**：`sessions.claude` / `sessions.dsh`），**所有飞书消息共用一个会话**，
-模型能记住之前的对话内容（同一会话内串行处理，避免并发写入互相覆盖上下文）。
-切换 `backend` 时两个分区各自保留，切回来仍能延续旧后端的上下文。
+桥接层为每个后端维护一个固定会话 id（存 `.feishu_sessions.json` 或各实例隔离的 `.feishu_sessions.<instance>.json`，**按后端分区**：`sessions.agy` / `sessions.claude` / `sessions.dsh`），**所有飞书消息共用一个会话**，模型能记住之前的对话内容（同一会话内串行处理，避免并发写入互相覆盖上下文）。
 
+- **agy 后端**（Antigravity）：会话 id 是 UUID。首轮消息由 `agy` 自动生成 conversation_id，后续消息通过 `--conversation <uuid>` 延续；支持独立配置文件 `config.agy.json` 与独立服务 `com.antigravity.feishu-bridge`。
 - **claude 后端**：会话 id 是 UUID。首次消息用 `--session-id` 创建会话，之后
   用 `--resume` 续聊；会话文件在 `~/.claude/projects/<工作目录转义>/`。会话
   文件被外部删除时自动回退重建，不会中断对话。
@@ -143,8 +138,7 @@ cd /Users/zhaojingtao/Documents/harnessWorkSpace/feishu-bridge && .venv/bin/pyth
 - **空闲自动结束会话**：距上次消息超过 `session_idle_timeout_min`（默认 0 =
   不启用）后，下一条消息自动轮换到全新会话 id（旧会话就此结束、上下文清空）；
   未超时则沿用同一会话。
-- 发送「新会话」/「退出会话」/「重置会话」会轮换**当前后端**的会话 id，
-  下一次对话自动走全新上下文（另一个后端的分区不受影响）。
+- **重置对话命令**：发送「新对话」、「新会话」、「重置对话」、「重置会话」、「重新开始」、「清空上下文」、「/new」、「/reset」或「/clear」，会立即轮换**当前后端**的会话 id，下一次对话自动走全新上下文（另一个后端的分区不受影响）。
 
 ### 会话删除（桥接不删任何会话）
 
@@ -171,7 +165,7 @@ claude 的认证 token 存在 `config.json` 的 `claude_env.ANTHROPIC_AUTH_TOKEN
 2. 同步到桥接并重启服务：
 
    ```bash
-   cd ~/Documents/harnessWorkSpace/feishu-bridge
+   cd ~/Documents/feishu-bridge
    .venv/bin/python update_token.py
    ```
 

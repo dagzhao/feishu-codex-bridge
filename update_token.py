@@ -7,7 +7,7 @@ claude 的认证 token 存在 ``config.json`` 的 ``claude_env.ANTHROPIC_AUTH_TO
 
 用法::
 
-    cd ~/Documents/harnessWorkSpace/feishu-bridge
+    cd ~/Documents/feishu-bridge
     .venv/bin/python update_token.py             # 从 ~/.zshrc 读取并同步（推荐：先更新 zshrc）
     .venv/bin/python update_token.py sk-新token  # 直接指定（注意会留在 shell 历史里）
 

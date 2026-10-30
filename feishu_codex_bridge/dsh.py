@@ -13,6 +13,7 @@ Agent 执行任务、打印最终答复并退出。无 Codex 那样的 JSON 事�
 
 import logging
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -20,6 +21,27 @@ import time
 from typing import Callable, Optional
 
 LOGGER = logging.getLogger("feishu_codex_bridge.dsh")
+
+
+def _load_api_key() -> str:
+    """取 DEEPSEEK_API_KEY: 优先环境变量, 否则从 DSH 凭据文件读。
+
+    launchd 起的进程没有登录 shell 的环境, 而 `dsh` 在 standalone 运行时
+    不会自动从凭据服务取到这个 route 的 key(报 MISSING_CREDENTIAL),
+    所以在调 headless 前显式补上。
+    """
+    if os.environ.get("DEEPSEEK_API_KEY"):
+        return os.environ["DEEPSEEK_API_KEY"]
+    path = os.path.expanduser("~/.dsh/.credentials.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*DEEPSEEK_API_KEY:\s*(\S+)", line)
+                if m:
+                    return m.group(1)
+    except OSError:
+        pass
+    return ""
 
 
 def run_dsh(
@@ -53,6 +75,9 @@ def run_dsh(
         env["DSH_PERMISSION_MODE"] = permission_mode
     else:
         env.pop("DSH_PERMISSION_MODE", None)
+    api_key = _load_api_key()
+    if api_key:
+        env.setdefault("DEEPSEEK_API_KEY", api_key)
 
     proc = subprocess.Popen(
         cmd,

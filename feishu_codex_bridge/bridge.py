@@ -39,32 +39,44 @@ _reconnecting: bool = False
 _warned_long_disconnect: bool = False
 _LONG_DISCONNECT_WARN_SEC = 60.0
 
-_CLEAR_CMDS = ("新会话", "退出会话", "结束会话", "退出当前会话", "重置会话")
+_CLEAR_CMDS = (
+    "新会话",
+    "新对话",
+    "重置会话",
+    "重置对话",
+    "结束会话",
+    "结束对话",
+    "退出会话",
+    "退出对话",
+    "退出当前会话",
+    "重新开始",
+    "清空上下文",
+    "清空会话",
+    "清空对话",
+    "/new",
+    "/reset",
+    "/clear",
+)
 
-# 固定会话：所有飞书消息共用一个固定会话 id（不区分用户），映射存本地
-# .feishu_sessions.json，**按后端分区**（claude / dsh 各存各的 id，切换
-# 后端互不覆盖；旧版 flat 格式在首次读写时自动迁移，历史 dsh 会话指针
-# 保留）。「新会话」只轮换当前后端的 id，下次对话走全新会话。会话文件
-# （claude 在 ~/.claude/projects，dsh 在 ~/.dsh/sessions）由各自侧管理，
-# 桥接层不删任何会话文件。
-#
-# 会话生命周期（2026-08-22 起）：默认**永不因空闲自动轮换**——只有
-# 消息为「新会话」等命令时才轮换到全新会话 id。若在 config.json 显式
-# 配置 session_idle_timeout_min > 0，则仍按该分钟数空闲自动轮换
-# （可选兼容行为，默认 0 = 不轮换）。
 _SESSION_MAP_FILE = Path(__file__).resolve().parent.parent / ".feishu_sessions.json"
 _SESSIONS_KEY = "sessions"
-# 旧版 flat 格式的键（一次性迁移用，见 _migrate_legacy_map）。
 _SHARED_SESSION_KEY = "shared"
 _SHARED_ACTIVE_KEY = "shared_active_at"
 
-# 单实例 pidfile：防止误起多个桥接进程导致飞书消息重复处理。
 _PID_FILE = Path(__file__).resolve().parent.parent / ".bridge.pid"
-# 持有 flock 的文件对象（保持引用防止被 GC 关闭而释放锁）。
 _PID_LOCK_FH = None
 
-# 所有消息共用同一会话后，并发 run_task 会互相覆盖上下文，串行执行保证安全。
 _RUN_LOCK = threading.Lock()
+
+
+def set_instance(instance: str = "") -> None:
+    """按实例名（如 'agy'）切换隔离的状态文件、pid 文件与会话文件路径。"""
+    global _PID_FILE, _STATE_FILE, _SESSION_MAP_FILE
+    suffix = f".{instance}" if instance else ""
+    base = Path(__file__).resolve().parent.parent
+    _PID_FILE = base / f".bridge{suffix}.pid"
+    _STATE_FILE = base / f".bridge_state{suffix}.json"
+    _SESSION_MAP_FILE = base / f".feishu_sessions{suffix}.json"
 
 
 def _load_last_chat_id() -> Optional[str]:
@@ -274,6 +286,18 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
     # 分钟数空闲轮换）；只有「新会话」等命令才强制轮换全新上下文。
     idle_min = float(config.get("session_idle_timeout_min", 0) or 0)
     idle_sec = idle_min * 60 if idle_min > 0 else None
+
+    def _on_session_id(sid: str) -> None:
+        if not sid:
+            return
+        data = _migrate_legacy_map(_load_session_map())
+        sessions = data.setdefault(_SESSIONS_KEY, {})
+        entry = sessions.get(backend.name)
+        if isinstance(entry, dict) and entry.get("id") == sid:
+            return
+        sessions[backend.name] = {"id": sid, "active_at": time.time()}
+        _save_session_map(data)
+
     with _RUN_LOCK:
         result = run_task(
             backend,
@@ -284,6 +308,7 @@ def handle_message(event: P2ImMessageReceiveV1, config: dict, client: lark.Clien
             on_progress=_send_progress,
             progress_interval=float(config.get("progress_interval_sec", 10)),
             session_id=_shared_session_id(backend, idle_timeout_sec=idle_sec),
+            on_session_id=_on_session_id,
         )
     max_len = int(config.get("max_reply_len", 3500))
     if len(result) > max_len:
@@ -340,11 +365,21 @@ def _acquire_single_instance() -> None:
     fh.flush()
 
 
-def main() -> None:
-    config = load_config()
-    setup_logging(config)
+def main(cli_args: Optional[list[str]] = None) -> None:
+    from .config import get_config_path, get_instance_name
+    config_path = get_config_path(cli_args)
+    config = load_config(config_path)
+    instance = get_instance_name(config, config_path)
+    set_instance(instance)
+    setup_logging(config, instance=instance)
     _acquire_single_instance()
-    LOGGER.info("飞书桥接服务启动: app_id=%s backend=%s", config["app_id"], config.get("backend"))
+    LOGGER.info(
+        "飞书桥接服务启动: instance=%s app_id=%s backend=%s config=%s",
+        instance or "(default)",
+        config["app_id"],
+        config.get("backend"),
+        config_path.name,
+    )
     client = build_lark_client(config)
 
     def _on_reconnecting() -> None:

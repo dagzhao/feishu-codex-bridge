@@ -14,9 +14,38 @@ CONFIG_PATH = BASE_DIR / "config.json"
 
 # native 安装的 claude 默认位置（launchd 的 PATH 通常不含 ~/.local/bin）。
 _CLAUDE_FALLBACK_BIN = Path.home() / ".local" / "bin" / "claude"
+# native 安装的 agy 默认位置。
+_AGY_FALLBACK_BIN = Path.home() / ".local" / "bin" / "agy"
 
 
-def load_config(config_path: Path = CONFIG_PATH) -> dict:
+def get_config_path(cli_args: list[str] | None = None) -> Path:
+    """获取配置文件路径：优先命令行参数 --config / -c，其次环境变量 FEISHU_BRIDGE_CONFIG，默认 config.json。"""
+    args = sys.argv[1:] if cli_args is None else cli_args
+    for i, arg in enumerate(args):
+        if arg in ("--config", "-c") and i + 1 < len(args):
+            return Path(args[i + 1]).resolve()
+        if arg.startswith("--config="):
+            return Path(arg.split("=", 1)[1]).resolve()
+    env_cfg = os.environ.get("FEISHU_BRIDGE_CONFIG")
+    if env_cfg:
+        return Path(env_cfg).resolve()
+    return CONFIG_PATH
+
+
+def get_instance_name(config: dict, config_path: Path | None = None) -> str:
+    """获取实例标识：config["instance"] > config.<instance>.json > 空字符串。"""
+    if config.get("instance"):
+        return str(config["instance"]).strip()
+    if config_path:
+        stem = config_path.stem
+        if stem.startswith("config."):
+            return stem.split(".", 1)[1].strip()
+    return ""
+
+
+def load_config(config_path: Path | None = None) -> dict:
+    if config_path is None:
+        config_path = get_config_path()
     with open(config_path, "r", encoding="utf-8") as fh:
         cfg = json.load(fh)
     app_id = cfg.get("app_id", "")
@@ -30,14 +59,17 @@ def load_config(config_path: Path = CONFIG_PATH) -> dict:
             )
             backend = _DEFAULT_BACKEND
         cfg["backend"] = backend
-        # 两个后端的可执行文件都解析（切换后端无需改解析逻辑；dsh 保留兼容）。
+        # 各后端的可执行文件都解析（切换后端无需改解析逻辑）。
         cfg["dsh_bin"] = resolve_dsh_bin(cfg.get("dsh_bin"))
         cfg["claude_bin"] = resolve_claude_bin(cfg.get("claude_bin"))
+        cfg["agy_bin"] = resolve_agy_bin(cfg.get("agy_bin"))
         if not isinstance(cfg.get("claude_env"), dict):
             cfg["claude_env"] = {}
+        if not isinstance(cfg.get("agy_env"), dict):
+            cfg["agy_env"] = {}
         _startup_selfcheck(cfg)
         return cfg
-    raise SystemExit("config.json 中的 app_id 尚未填写，请先按 README 配置飞书应用。")
+    raise SystemExit(f"{config_path.name} 中的 app_id 尚未填写，请先按 README 配置飞书应用。")
 
 
 def resolve_dsh_bin(configured: str | None = None) -> str:
@@ -111,30 +143,64 @@ def resolve_claude_bin(configured: str | None = None) -> str:
     return configured or "claude"
 
 
-def _startup_selfcheck(cfg: dict) -> None:
-    """启动自检：只记 ERROR 日志不退出，避免 launchd 崩溃重启循环。"""
-    if cfg.get("backend") != "claude":
-        return
-    logger = logging.getLogger("feishu_codex_bridge.config")
-    bin_path = cfg.get("claude_bin") or ""
-    p = Path(bin_path)
-    if not (p.is_file() and os.access(p, os.X_OK)):
-        logger.error("claude_bin 不可执行（%s），claude 任务将无法运行", bin_path)
-    env = cfg.get("claude_env") or {}
-    if not (
-        env.get("ANTHROPIC_AUTH_TOKEN")
-        or env.get("ANTHROPIC_API_KEY")
-        or os.environ.get("ANTHROPIC_AUTH_TOKEN")
-        or os.environ.get("ANTHROPIC_API_KEY")
-    ):
-        logger.error(
-            "未配置 ANTHROPIC_AUTH_TOKEN（config.json 的 claude_env 或环境变量）。"
-            "launchd 环境拿不到 zshrc 里的 token，claude 调用会认证失败"
+def resolve_agy_bin(configured: str | None = None) -> str:
+    """解析可用的 agy 可执行文件路径。
+
+    优先级：
+      1. 配置里显式指定的路径（存在且可执行）→ 直接用；
+      2. `which agy`（PATH 上有 agy）→ 用 PATH 上的；
+      3. ~/.local/bin/agy（native 安装默认位置，launchd 的 PATH 通常不含它）。
+    返回解析结果；都找不到时返回配置值。
+    """
+    if configured:
+        p = Path(configured)
+        if p.is_file() and os.access(p, os.X_OK):
+            return configured
+        logging.getLogger("feishu_codex_bridge.config").warning(
+            "配置的 agy_bin 不存在或不可执行: %s，尝试自动解析", configured
         )
 
+    found = shutil.which("agy")
+    if found:
+        return found
 
-def setup_logging(config: dict) -> None:
-    log_path = BASE_DIR / config.get("log_file", "bridge.log")
+    if _AGY_FALLBACK_BIN.is_file() and os.access(_AGY_FALLBACK_BIN, os.X_OK):
+        return str(_AGY_FALLBACK_BIN)
+
+    return configured or "agy"
+
+
+def _startup_selfcheck(cfg: dict) -> None:
+    """启动自检：只记 ERROR 日志不退出，避免 launchd 崩溃重启循环。"""
+    backend = cfg.get("backend")
+    logger = logging.getLogger("feishu_codex_bridge.config")
+    if backend == "claude":
+        bin_path = cfg.get("claude_bin") or ""
+        p = Path(bin_path)
+        if not (p.is_file() and os.access(p, os.X_OK)):
+            logger.error("claude_bin 不可执行（%s），claude 任务将无法运行", bin_path)
+        env = cfg.get("claude_env") or {}
+        if not (
+            env.get("ANTHROPIC_AUTH_TOKEN")
+            or env.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("ANTHROPIC_API_KEY")
+        ):
+            logger.error(
+                "未配置 ANTHROPIC_AUTH_TOKEN（config.json 的 claude_env 或环境变量）。"
+                "launchd 环境拿不到 zshrc 里的 token，claude 调用会认证失败"
+            )
+    elif backend == "agy":
+        bin_path = cfg.get("agy_bin") or ""
+        p = Path(bin_path)
+        if not (p.is_file() and os.access(p, os.X_OK)):
+            logger.error("agy_bin 不可执行（%s），agy 任务将无法运行", bin_path)
+
+
+def setup_logging(config: dict, instance: str = "") -> None:
+    default_log = f"bridge.{instance}.log" if instance else "bridge.log"
+    log_file = config.get("log_file") or default_log
+    log_path = BASE_DIR / log_file
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",

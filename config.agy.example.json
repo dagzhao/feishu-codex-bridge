@@ -1,0 +1,18 @@
+{
+  "instance": "agy",
+  "app_id": "cli_xxxxxxxxxxxxxxxx",
+  "app_secret": "请填写你的AppSecret",
+  "allowed_open_ids": [],
+  "allowed_chat_ids": [],
+  "backend": "agy",
+  "agy_bin": "",
+  "agy_permission_mode": "bypassPermissions",
+  "agy_model": "",
+  "agy_effort": "high",
+  "workdir": "/Users/zhaojingtao/Documents/feishu-workspace",
+  "session_idle_timeout_min": 0,
+  "task_timeout_sec": 600,
+  "progress_interval_sec": 10,
+  "max_reply_len": 3500,
+  "log_file": "bridge.agy.log"
+}
