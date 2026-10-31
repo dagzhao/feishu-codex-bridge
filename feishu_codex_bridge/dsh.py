@@ -53,6 +53,8 @@ def run_dsh(
     progress_interval: float = 10.0,
     session_id: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    on_session_id: Optional[Callable[[str], None]] = None,
+    **kwargs,
 ) -> str:
     """运行 dsh --profile headless 并返回最终答复文本。
 

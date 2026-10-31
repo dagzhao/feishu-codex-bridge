@@ -93,3 +93,19 @@ exit 2
         timeout=30,
     )
     assert "退出码 2" in result and "oops" in result
+
+
+def test_run_dsh_accepts_extra_kwargs_and_on_session_id(tmp_path):
+    script = """#!/bin/sh
+echo 'ok'
+"""
+    result = run_dsh(
+        "测试任务",
+        _fake_dsh(tmp_path, script),
+        str(tmp_path),
+        timeout=30,
+        on_session_id=lambda sid: None,
+        extra_arbitrary_arg=123,
+    )
+    assert result == "ok"
+

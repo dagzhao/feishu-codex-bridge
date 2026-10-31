@@ -56,6 +56,7 @@ class Backend:
     backup_env_key: Optional[str] = None  # config 里备用环境变量的键（主 key 失败时叠加重试）
     model_key: Optional[str] = None  # config 里模型名的键（可空；留空 = 用后端默认模型）
     effort_key: Optional[str] = None  # config 里推理深度/思考深度的键（可空）
+    supports_session_callback: bool = False  # 是否支持异步/执行后回传 session_id
 
 
 BACKENDS: dict[str, Backend] = {
@@ -71,6 +72,7 @@ BACKENDS: dict[str, Backend] = {
         env_key="claude_env",
         backup_env_key="claude_env_backup",
         model_key="claude_model",
+        supports_session_callback=False,
     ),
     "dsh": Backend(
         name="dsh",
@@ -81,6 +83,7 @@ BACKENDS: dict[str, Backend] = {
         new_session_id=_new_dsh_session_id,
         looks_like=_looks_like_dsh_session,
         run=run_dsh,
+        supports_session_callback=False,
     ),
     "agy": Backend(
         name="agy",
@@ -94,6 +97,7 @@ BACKENDS: dict[str, Backend] = {
         env_key="agy_env",
         model_key="agy_model",
         effort_key="agy_effort",
+        supports_session_callback=True,
     ),
 }
 
@@ -139,7 +143,7 @@ def run_task(
         effort = config.get(backend.effort_key)
         if effort:
             kwargs["effort"] = effort
-    if on_session_id is not None:
+    if backend.supports_session_callback and on_session_id is not None:
         kwargs["on_session_id"] = on_session_id
     try:
         return backend.run(

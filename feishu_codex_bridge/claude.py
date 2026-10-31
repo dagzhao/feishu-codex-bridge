@@ -182,6 +182,8 @@ def run_claude(
     extra_env: Optional[dict] = None,
     backup_env: Optional[dict] = None,
     model: Optional[str] = None,
+    on_session_id: Optional[Callable[[str], None]] = None,
+    **kwargs,
 ) -> str:
     """运行 claude headless 并返回最终答复文本。
 
